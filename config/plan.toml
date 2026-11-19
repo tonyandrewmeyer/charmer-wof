@@ -1,5 +1,6 @@
-# Planner settings. Sampling and budget (PLAN §6) arrive with GHA in phase 3;
-# for now the planner expands the full matrix.
+# Planner settings. `wof plan` expands the full matrix; on GHA (eval.yml) a
+# scheduled run takes a seeded sample of it (anchors first), and a manual run
+# names its cells. Budget-weighted sampling (PLAN §6) is still to come.
 
 reps = 3
 
@@ -25,3 +26,11 @@ task = "hedgedoc-ingress"
 harness = "pi"
 model = "deepseek-v4-pro"
 treatment = "howto"
+
+# The GitHub Actions eval (eval.yml, phase 3). `max_cells` is a hard cap per
+# workflow run: `wof plan --matrix-json` fails rather than emit more, whatever
+# the inputs say. At the caps above a full 24-cell run can spend at most $72;
+# the OpenRouter key's own credit limit is the real ceiling.
+[gha]
+max_cells = 24
+scheduled_sample = 8   # the weekly run; anchors run monthly, on their own

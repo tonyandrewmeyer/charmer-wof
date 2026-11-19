@@ -56,6 +56,24 @@ class AdapterResult:
     details: dict[str, Any] = dataclasses.field(default_factory=dict)
     """Harness-specific diagnostics, kept in the process tier's details."""
 
+    def to_json(self) -> dict[str, Any]:
+        """A JSON-safe form, for handing the result from the agent job to the score job."""
+        out = dataclasses.asdict(self)
+        out["transcript_path"] = str(self.transcript_path) if self.transcript_path else None
+        return out
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> AdapterResult:
+        fields = {f.name for f in dataclasses.fields(cls)}
+        unknown = set(data) - fields
+        if unknown:
+            raise ValueError(f"unknown AdapterResult fields: {', '.join(sorted(unknown))}")
+        data = dict(data)
+        data["events"] = [ToolEvent(**e) for e in data.get("events", [])]
+        if data.get("transcript_path"):
+            data["transcript_path"] = pathlib.Path(data["transcript_path"])
+        return cls(**data)
+
 
 class HarnessAdapter(Protocol):
     name: str

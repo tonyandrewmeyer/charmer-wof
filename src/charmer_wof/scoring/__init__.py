@@ -7,8 +7,11 @@ whenever a change here could move a score, tag or metric for the same agent
 output; don't bump it for refactors that can't.
 """
 
-SCORING_CODE_VERSION = "2"
-"""2 (2026-11-16): the key-oracle-test-failed, no-edits and only-vendored-libs-changed tags."""
+SCORING_CODE_VERSION = "3"
+"""2 (2026-11-16): the key-oracle-test-failed, no-edits and only-vendored-libs-changed tags.
+3 (2026-11-19): pack (``scoring.pack``): the static tier fails, and is tagged
+``pack-build-failed``, when ``charmcraft pack`` fails, where version 2 always
+recorded pack ``not_run``."""
 
 
 def scoring_code_version(charmlint: str) -> str:

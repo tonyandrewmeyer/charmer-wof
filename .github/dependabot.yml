@@ -1,0 +1,25 @@
+# Weekly, grouped: one PR for the workflows' actions (pinned by SHA, with a
+# version comment dependabot keeps in step), one for the uv lockfile.
+# Harness versions (config/harnesses.toml), the omp binary's sha256
+# (ci/install-harness.sh), uv's version (eval.yml's UV_VERSION) and the
+# charmcraft snap channel are bumped by hand: dependabot can't see them.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      python:
+        patterns: ["*"]

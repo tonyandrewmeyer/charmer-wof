@@ -12,8 +12,11 @@ Sub-checks, each ``pass``/``fail``/``error``/``not_run``:
   environment and config (``uv run``), as §9 did. Fails if either count rose
   above the base.
 - ``charmlint``: findings at the pinned version; fails if the total rose.
-- ``pack``: ``charmcraft pack``. Needs charmcraft (and in practice LXD);
-  ``not_run`` where it isn't installed. TODO(phase 3): runs in GHA.
+- ``pack``: ``charmcraft pack`` on a copy of the workspace (``scoring.pack``),
+  since scoring-code version 3. Needs charmcraft and a build backend (LXD on
+  GHA); ``not_run`` where charmcraft isn't installed or pack is turned off,
+  ``error`` when the backend rather than the charm failed. A failed pack is
+  the ``pack-build-failed`` tag.
 - ``only-vendored-libs-changed`` (a tag, not a sub-check): given the paths
   the agent changed (``workspace.changed_paths``), it changed something and
   all of it is under ``lib/``.
@@ -39,6 +42,7 @@ from .. import workspace as workspace_mod
 from ..config import StaticChecks
 from ..schema import TierOutcome
 from . import _proc
+from . import pack as pack_mod
 
 TYPECHECK_TODO = "type check not wired in yet (choose checker and pin; see HARNESS.md)"
 
@@ -228,6 +232,7 @@ def run_static(
     runner: _proc.Runner = _proc.run,
     which=shutil.which,
     changed: list[str] | None = None,
+    pack: bool = True,
 ) -> TierOutcome:
     results: dict[str, dict[str, Any]] = {}
     tags: list[str] = []
@@ -270,12 +275,12 @@ def run_static(
     if (ruff_delta or 0) > 0 or (fmt_delta or 0) > 0 or (cl_delta or 0) > 0:
         tags.append("lint-regression")
 
-    if which("charmcraft") is None:
-        results["pack"] = _check("not_run", "charmcraft not installed")
+    if pack:
+        results["pack"] = pack_mod.run_pack(workspace, runner=runner, which=which)
     else:
-        # TODO(phase 3): pack in GHA, where LXD is available; a destructive-mode
-        # pack here would touch the host.
-        results["pack"] = _check("not_run", "pack runs in the GHA job (phase 3)")
+        results["pack"] = _check("not_run", "pack turned off for this scoring run")
+    if results["pack"]["status"] == "fail":
+        tags.append(pack_mod.TAG)
     results["typecheck"] = _check("not_run", TYPECHECK_TODO)
 
     if changed is not None and workspace_mod.only_vendored(changed):
@@ -301,7 +306,7 @@ def run_static(
         "ruff_format_delta": fmt_delta,
         "charmlint_total": cl.get("total"),
         "charmlint_delta": cl_delta,
-        "packed": None,
+        "packed": _ok(results["pack"]),
     }
     return TierOutcome(
         status=status,

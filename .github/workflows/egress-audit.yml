@@ -1,0 +1,61 @@
+# One small real run with the agent job's harden-runner in *audit* mode
+# (EGRESS.md: "Run it once in egress-policy: audit first"). harden-runner then
+# records every destination the agent job reaches instead of blocking, and its
+# report (linked from the job summary of the `agent` job) is what eval.yml's
+# allowed-endpoints list is checked and tightened against.
+#
+# It runs eval.yml itself, so the job graph, the installs and the paths are the
+# ones a scheduled run uses; the record is scored and stored like any other.
+# One cell: one task, one harness, one model, the baseline treatment, rep 0.
+# Costs one run (up to the $3 cap in config/plan.toml).
+name: egress-audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Task (a public-gold feature task keeps the audit to one secret)"
+        type: choice
+        default: haproxy-get-configuration
+        options:
+          - haproxy-get-configuration
+          - haproxy-client-ip-hash-salt
+          - alertmanager-workload-tracing
+          - hedgedoc-ingress
+          - hedgedoc-s3
+          - new-gotify-k8s
+          - new-pushgateway-k8s
+      harness:
+        description: "Harness"
+        type: choice
+        default: pi
+        options: [pi, omp, opencode]
+      model:
+        description: "Model (config/models.toml key; GLM-5.3 is the cheaper)"
+        type: choice
+        default: glm-5-3
+        options: [glm-5-3, deepseek-v4-pro]
+
+permissions: {}
+
+concurrency:
+  group: wof-egress-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: eval (agent job in audit mode)
+    # The workspace-relative form, not zizmor's suggested `$/...`: actionlint
+    # 1.7.12 (the latest) doesn't accept that syntax yet, and nothing here
+    # clones another action into the workspace before this call.
+    uses: ./.github/workflows/eval.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: write # the store job appends the record to the results branch
+    with:
+      cells: ${{ format('{0}/{1}/{2}/none/0', inputs.task, inputs.harness, inputs.model) }}
+      egress_policy: audit
+      max_cells: "1"
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      HEDGEDOC_GOLD_TOKEN: ${{ secrets.HEDGEDOC_GOLD_TOKEN }}
+      WOF_ARTIFACT_KEY: ${{ secrets.WOF_ARTIFACT_KEY }}

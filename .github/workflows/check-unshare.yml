@@ -1,0 +1,89 @@
+# One-off check (EGRESS.md, "Does `unshare --mount` work on GitHub-hosted
+# Ubuntu runners?"): can the harness hide a directory from the agent with its
+# own command on a hosted runner, and if not, does lifting Ubuntu 24.04's
+# AppArmor restriction on unprivileged user namespaces fix it?
+#
+# Run it from the Actions tab ("Run workflow"); read the job summary. It runs
+# nothing of this package and needs no secrets.
+name: check-unshare
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: wof-check-unshare
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: unshare on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions: {}
+    env:
+      # The adapters' own hiding script (charmer_wof/adapters/_common.py), for
+      # one path: mount an empty read-only tmpfs over it, then list it.
+      HIDE: 'mount -t tmpfs -o size=1m,mode=0555 wof-hidden "$1" || exit 97; ls -la "$1"; [ -z "$(ls -A "$1")" ]'
+    steps:
+      - name: Environment
+        run: |
+          id; uname -r; head -2 /etc/os-release
+          sysctl kernel.apparmor_restrict_unprivileged_userns || echo "kernel.apparmor_restrict_unprivileged_userns: not present"
+          sysctl kernel.unprivileged_userns_clone || true
+          mkdir -p "$RUNNER_TEMP/gold" && echo secret > "$RUNNER_TEMP/gold/charm.py"
+
+      - name: 1. The harness's command, unprivileged (the adapter's path when not root)
+        id: unprivileged
+        continue-on-error: true
+        run: unshare --mount --map-root-user sh -c "$HIDE" wof-hide "$RUNNER_TEMP/gold"
+
+      - name: 2. Only if 1 failed - lift the AppArmor restriction, then try 1 again
+        id: after_sysctl
+        if: steps.unprivileged.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          unshare --mount --map-root-user sh -c "$HIDE" wof-hide "$RUNNER_TEMP/gold"
+
+      - name: 3. With sudo (the adapter's root path), for comparison
+        id: as_root
+        continue-on-error: true
+        run: sudo unshare --mount sh -c "$HIDE" wof-hide "$RUNNER_TEMP/gold"
+
+      - name: Outside the namespace the gold is untouched
+        run: grep -qx secret "$RUNNER_TEMP/gold/charm.py"
+
+      - name: Answer
+        env:
+          OS: ${{ matrix.os }}
+          UNPRIVILEGED: ${{ steps.unprivileged.outcome }}
+          AFTER_SYSCTL: ${{ steps.after_sysctl.outcome }}
+          AS_ROOT: ${{ steps.as_root.outcome }}
+        run: |
+          if [ "$UNPRIVILEGED" = success ]; then
+            answer="YES as is: the harness's unprivileged unshare works on $OS; eval.yml's sysctl line is harmless but not needed."
+          elif [ "$AFTER_SYSCTL" = success ]; then
+            answer="YES after the sysctl: on $OS unprivileged unshare fails until kernel.apparmor_restrict_unprivileged_userns=0; keep eval.yml's sysctl step."
+          elif [ "$AS_ROOT" = success ]; then
+            answer="ONLY AS ROOT: on $OS neither unprivileged path works; the adapter would have to run under sudo (EGRESS.md option 2)."
+          else
+            answer="NO: on $OS none of the three ways hid the directory; the agent job cannot hide anything as written."
+          fi
+          echo "ANSWER: $answer"
+          {
+            echo "### unshare on $OS"
+            echo
+            echo "| Step | Outcome |"
+            echo "|---|---|"
+            echo "| 1. unprivileged, as is | $UNPRIVILEGED |"
+            echo "| 2. unprivileged, after the sysctl (only if 1 failed) | ${AFTER_SYSCTL:-skipped} |"
+            echo "| 3. as root (sudo) | $AS_ROOT |"
+            echo
+            echo "**$answer**"
+          } >> "$GITHUB_STEP_SUMMARY"

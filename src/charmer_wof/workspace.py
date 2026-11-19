@@ -87,6 +87,11 @@ def prepare(
             tf.extractall(dest, filter="data")
     _git(["init", "-q"], dest)
 
+    # 1b. A gold that doesn't commit lib/ gets its declared libs from Charmhub,
+    # before the removal (so remove_paths can take the feature's lib out again).
+    if task.fetch_libs:
+        fetch_libs(dest)
+
     # 2. Remove the feature.
     if task.removal_diff is not None:
         diff = task.path(task.removal_diff).resolve()
@@ -142,6 +147,32 @@ def prepare(
     base_sha = _git(["rev-parse", "HEAD"], dest, text=True).stdout.strip()
     (dest / HARNESS_DIR / "base-sha").write_text(base_sha + "\n")
     return Workspace(dest, base_sha, prompt)
+
+
+def fetch_libs(dest: pathlib.Path, charmcraft: str = "charmcraft") -> None:
+    """``charmcraft fetch-libs`` in ``dest`` (a task with ``fetch_libs``); refuses without it."""
+    if shutil.which(charmcraft) is None:
+        raise WorkspaceError(
+            "the task needs `charmcraft fetch-libs` and charmcraft isn't installed"
+        )
+    proc = subprocess.run(
+        [charmcraft, "fetch-libs"], cwd=dest, capture_output=True, text=True, timeout=600
+    )
+    if proc.returncode != 0:
+        raise WorkspaceError(
+            f"charmcraft fetch-libs failed: {(proc.stderr or proc.stdout)[-2000:]}"
+        )
+
+
+def load(path: pathlib.Path) -> Workspace:
+    """A workspace ``prepare`` built earlier (in another job, on GHA), from its ``.wof/``."""
+    harness = path / HARNESS_DIR
+    try:
+        base_sha = (harness / "base-sha").read_text().strip()
+        prompt = (harness / "prompt.md").read_text().removesuffix("\n")
+    except FileNotFoundError as e:
+        raise WorkspaceError(f"{path} is not a prepared workspace: {e.filename} missing") from e
+    return Workspace(path, base_sha, prompt)
 
 
 def snapshot(workspace: pathlib.Path) -> None:

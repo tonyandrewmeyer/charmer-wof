@@ -6,7 +6,11 @@
 
 [tags.pack-failed]
 tiers = ["static", "live"]
-description = "charmcraft pack failed, or charmcraft.yaml did not validate."
+description = "charmcraft.yaml did not parse or validate (the static tier's own check; charmcraft pack itself failing is pack-build-failed since 2026-11-19)."
+
+[tags.pack-build-failed]
+tiers = ["static"]
+description = "charmcraft pack ran and failed (or left no .charm): a build error, not a machine without a build backend (that is recorded as an error, untagged)."
 
 [tags.charm-lib-missing]
 tiers = ["static", "judge"]

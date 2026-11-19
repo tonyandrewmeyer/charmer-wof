@@ -114,6 +114,20 @@ class Task(_Strict):
             "directory alone, and removal_diff and remove_paths are relative to it."
         ),
     )
+    gold_private: bool = Field(
+        default=False,
+        description=(
+            "The gold repo needs a read token to clone (hedgedoc-operator). On GHA the prep "
+            "job uses HEDGEDOC_GOLD_TOKEN for it, and skips the task's cells without one."
+        ),
+    )
+    fetch_libs: bool = Field(
+        default=False,
+        description=(
+            "Run `charmcraft fetch-libs` in the workspace before committing the base, for a "
+            "gold that doesn't commit its lib/ (none of task set v1 needs it)."
+        ),
+    )
     removal_diff: pathlib.Path | None = None
     removal_strip: int = 1
     remove_paths: tuple[str, ...] = ()
@@ -335,10 +349,30 @@ class Anchor(_Strict):
     treatment: str
 
 
+class GhaConfig(_Strict):
+    """The GitHub Actions eval (eval.yml): how many cells one workflow run may hold."""
+
+    max_cells: int = Field(
+        default=24,
+        ge=1,
+        le=256,
+        description=(
+            "Hard cap: `wof plan --matrix-json` refuses a plan with more cells than this, "
+            "whatever the sample or the manual inputs say (GHA's own matrix limit is 256)."
+        ),
+    )
+    scheduled_sample: int = Field(
+        default=8,
+        ge=1,
+        description="Cells the weekly scheduled run picks (a seeded sample; anchors run monthly).",
+    )
+
+
 class PlanConfig(_Strict):
     reps: int = 3
     caps: Caps = Caps()
     anchors: tuple[Anchor, ...] = ()
+    gha: GhaConfig = GhaConfig()
 
 
 # --- the whole thing ---------------------------------------------------------

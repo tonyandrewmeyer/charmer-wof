@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import random
 from collections.abc import Iterable
 
 from .config import Config
@@ -91,3 +92,54 @@ def resolve(config: Config, cell_id: str) -> PlannedCell:
     if not config.treatments[cell.treatment].applies(cell.task):
         raise ValueError(f"treatment {cell.treatment!r} does not apply to task {cell.task!r}")
     return PlannedCell(cell, is_anchor(config, cell), config.tasks[cell.task].held_out)
+
+
+class CapExceeded(ValueError):
+    pass
+
+
+def sample(cells: list[PlannedCell], n: int, seed: str) -> list[PlannedCell]:
+    """Up to ``n`` of ``cells``, a seeded uniform pick, in plan order.
+
+    The seed makes a scheduled run's pick reproducible (eval.yml uses the run's
+    date). Anchors aren't favoured: they have their own monthly schedule
+    (``--anchors-only``). Budget-weighted sampling (PLAN §6) will replace this.
+    """
+    picked = random.Random(seed).sample(cells, min(len(cells), n))
+    order = {c.id: i for i, c in enumerate(cells)}
+    return sorted(picked, key=lambda c: order[c.id])
+
+
+def matrix(config: Config, cells: list[PlannedCell], max_cells: int | None = None) -> dict:
+    """The GHA matrix for ``cells``: ``{"include": [...]}``, refused over the hard cap."""
+    cap = (
+        config.plan.gha.max_cells
+        if max_cells is None
+        else min(max_cells, config.plan.gha.max_cells)
+    )
+    if len(cells) > cap:
+        raise CapExceeded(
+            f"{len(cells)} cells is over the per-workflow cap of {cap} "
+            "(config/plan.toml [gha] max_cells); narrow the plan or sample it"
+        )
+    include = []
+    for p in cells:
+        task = config.tasks[p.cell.task]
+        include.append(
+            {
+                "cell": p.id,
+                "slug": p.id.replace("/", "__"),
+                "task": p.cell.task,
+                "harness": p.cell.harness,
+                "harness_version": config.harnesses[p.cell.harness].version,
+                "model": p.cell.model,
+                "treatment": p.cell.treatment,
+                "rep": p.cell.rep,
+                "anchor": p.anchor,
+                "kind": task.kind,
+                "gold_private": task.gold_private,
+                "fetch_libs": task.fetch_libs,
+                "python": task.python or "",
+            }
+        )
+    return {"include": include}

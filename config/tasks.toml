@@ -16,6 +16,7 @@ v2) surgically removed; the agent puts it back so HedgeDoc works under
 Traefik's /<model>-<app> prefix.
 """
 gold_repo = "https://github.com/tonyandrewmeyer/hedgedoc-operator"
+gold_private = true  # read token on GHA: HEDGEDOC_GOLD_TOKEN (prep job only)
 # The oldest commit the recorded removal diff applies to cleanly; the §9
 # reference-t2 tree was copied on 2026-09-21 and matches it.
 gold_sha = "85cec91dfa3b1ce8f74f1ede836ede1bd45e5b9b"
@@ -217,6 +218,7 @@ docs/how-to/store-uploads-in-object-storage.md) still describe it, as the
 ingress task's docs do.
 """
 gold_repo = "https://github.com/tonyandrewmeyer/hedgedoc-operator"
+gold_private = true  # read token on GHA: HEDGEDOC_GOLD_TOKEN (prep job only)
 gold_sha = "85cec91dfa3b1ce8f74f1ede836ede1bd45e5b9b"
 removal_diff = "tasks/hedgedoc-s3/removal.diff"
 removal_strip = 1

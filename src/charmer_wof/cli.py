@@ -1,4 +1,5 @@
-"""Command line: ``wof plan|run|prepare|static|oracle|schema|series|show|gold-check``."""
+"""Command line: ``wof plan|run|prepare|static|oracle|schema|series|show|gold-check``,
+and the GHA steps ``wof fetch-gold|agent|score|store``."""
 
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ import pathlib
 import sys
 import tempfile
 
-from . import ladder, planner, store, workspace
+from . import gold, ladder, planner, store, workspace
 from .config import load_config
 from .record import current_series
 from .schema import SCHEMA_VERSION, RunRecord, json_schema
@@ -27,20 +28,46 @@ def _config(args: argparse.Namespace):
     return load_config(roots)
 
 
+def _split(values: list[str] | None) -> list[str] | None:
+    """Repeatable options that also take comma- or space-separated lists (workflow inputs)."""
+    if not values:
+        return None
+    return [v for value in values for v in value.replace(",", " ").split()] or None
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
-    if not args.dry_run:
-        print("scheduling is phase 3; pass --dry-run to print the cell list", file=sys.stderr)
+    if not (args.dry_run or args.matrix_json):
+        print("pass --dry-run to print the cell list, or --matrix-json for GHA", file=sys.stderr)
         return 2
     config = _config(args)
-    cells = planner.expand(
-        config,
-        tasks=args.task,
-        harnesses=args.harness,
-        models=args.model,
-        treatments=args.treatment,
-        reps=args.reps,
-        anchors_only=args.anchors_only,
-    )
+    try:
+        if _split(args.cells):
+            cells = [planner.resolve(config, c) for c in _split(args.cells)]
+        else:
+            cells = planner.expand(
+                config,
+                tasks=_split(args.task),
+                harnesses=_split(args.harness),
+                models=_split(args.model),
+                treatments=_split(args.treatment),
+                reps=args.reps,
+                anchors_only=args.anchors_only,
+            )
+        if args.sample is not None:
+            n = config.plan.gha.scheduled_sample if args.sample < 0 else args.sample
+            cells = planner.sample(cells, n, args.seed)
+    except ValueError as e:
+        print(f"plan refused: {e}", file=sys.stderr)
+        return 2
+    if args.matrix_json:
+        try:
+            out = planner.matrix(config, cells, args.max_cells)
+        except planner.CapExceeded as e:
+            print(f"plan refused: {e}", file=sys.stderr)
+            return 2
+        print(json.dumps(out, separators=(",", ":")))
+        print(f"# {len(cells)} cells, series {current_series(config)}", file=sys.stderr)
+        return 0
     if args.json:
         for p in cells:
             print(json.dumps({"cell": p.id, "anchor": p.anchor, "held_out": p.held_out}))
@@ -229,6 +256,93 @@ def cmd_gold_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fetch_gold(args: argparse.Namespace) -> int:
+    config = _config(args)
+    task = config.tasks[args.task]
+    try:
+        gold.fetch(task, args.dest)
+    except gold.GoldTokenMissing as e:
+        print(f"skipped: {e}", file=sys.stderr)
+        return 3
+    except gold.GoldError as e:
+        print(f"fetch-gold failed: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps({"task": task.id, "gold": str(args.dest), "sha": task.gold_sha}))
+    return 0
+
+
+def cmd_agent(args: argparse.Namespace) -> int:
+    config = _config(args)
+    planned = planner.resolve(config, args.cell)
+    try:
+        ws = workspace.load(args.workspace.resolve())
+        result = ladder.run_agent(config, planned, ws)
+    except (ladder.RunError, workspace.WorkspaceError, RuntimeError) as e:
+        print(f"agent refused: {e}", file=sys.stderr)
+        return 2
+    print(
+        json.dumps(
+            {
+                "cell": planned.id,
+                "exit_reason": result.exit_reason,
+                "turns": result.turns,
+                "cost_usd": result.cost_usd,
+                "provider": result.provider,
+            }
+        )
+    )
+    return 0
+
+
+def cmd_score(args: argparse.Namespace) -> int:
+    config = _config(args)
+    planned = planner.resolve(config, args.cell)
+    tiers = tuple(_split([args.tiers]) or ())
+    try:
+        ws = workspace.load(args.workspace.resolve())
+        result = ladder.load_agent_result(ws, planned.id)
+        record = ladder.score(config, planned, ws, result, tiers=tiers)
+    except (ladder.RunError, workspace.WorkspaceError) as e:
+        print(f"score refused: {e}", file=sys.stderr)
+        return 2
+    store.append(args.results, record, allowed_tags=ladder.allowed_tags(config))
+    flagged = [t for _, t in record.all_failure_tags() if t in CONTAMINATION_TAGS]
+    print(
+        json.dumps(
+            {
+                "run_id": record.run_id,
+                "cell": record.cell.id,
+                "series": record.series,
+                "tiers": {name: t.status for name, t in record.tiers.items()},
+                "review": flagged,
+                "results": str(args.results),
+            }
+        )
+    )
+    return 0
+
+
+def cmd_store(args: argparse.Namespace) -> int:
+    """Append scored records to the store: validated, tag-checked, never twice, never dry."""
+    config = _config(args)
+    allowed = ladder.allowed_tags(config)
+    seen = {r.run_id for rs in store.group_by_series(args.results).values() for r in rs}
+    added = skipped = 0
+    for path in args.records:
+        for record in store.iter_records(path):
+            if record.dry_run:
+                print(f"{path}: {record.cell.id}: a dry run; not stored", file=sys.stderr)
+                return 1
+            if record.run_id in seen:
+                skipped += 1
+                continue
+            store.append(args.results, record, allowed_tags=allowed)
+            seen.add(record.run_id)
+            added += 1
+    print(json.dumps({"added": added, "already_stored": skipped, "results": str(args.results)}))
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="wof", description=__doc__)
     p.add_argument(
@@ -241,10 +355,29 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("plan", help="expand the configs into the cell list")
     s.add_argument("--dry-run", action="store_true", help="print the cells; schedule nothing")
+    s.add_argument(
+        "--matrix-json",
+        action="store_true",
+        help="print the GHA matrix ({'include': [...]}); refused over the [gha] max_cells cap",
+    )
     for name in ("task", "harness", "model", "treatment"):
-        s.add_argument(f"--{name}", action="append", help=f"only this {name} (repeatable)")
+        s.add_argument(
+            f"--{name}", action="append", help=f"only this {name} (repeatable, or comma-separated)"
+        )
     s.add_argument("--reps", type=int)
     s.add_argument("--anchors-only", action="store_true")
+    s.add_argument(
+        "--cells", action="append", help="exactly these cell ids (repeatable, or comma-separated)"
+    )
+    s.add_argument(
+        "--sample",
+        type=int,
+        nargs="?",
+        const=-1,
+        help="a seeded sample of this many (alone: [gha] scheduled_sample, the weekly run)",
+    )
+    s.add_argument("--seed", default="0", help="the sample's seed (eval.yml: the run's date)")
+    s.add_argument("--max-cells", type=int, help="a lower cap than [gha] max_cells")
     s.add_argument("--json", action="store_true", help="one JSON object per line")
     s.set_defaults(func=cmd_plan)
 
@@ -302,6 +435,43 @@ def parser() -> argparse.ArgumentParser:
     )
     s.add_argument("results", type=pathlib.Path, nargs="+")
     s.set_defaults(func=cmd_gold_check)
+
+    s = sub.add_parser(
+        "fetch-gold",
+        help=f"fetch a task's gold at its SHA (a private gold reads ${gold.TOKEN_ENV}; "
+        "exit 3 without it)",
+    )
+    s.add_argument("task")
+    s.add_argument("--dest", type=pathlib.Path, required=True)
+    s.set_defaults(func=cmd_fetch_gold)
+
+    s = sub.add_parser(
+        "agent", help="run a cell's agent on a prepared workspace (no scoring; GHA agent job)"
+    )
+    s.add_argument("cell")
+    s.add_argument("--workspace", type=pathlib.Path, required=True)
+    s.set_defaults(func=cmd_agent)
+
+    s = sub.add_parser(
+        "score", help="score a workspace the agent job left, and append its record (GHA)"
+    )
+    s.add_argument("cell")
+    s.add_argument("--workspace", type=pathlib.Path, required=True)
+    s.add_argument(
+        "--tiers",
+        default=",".join(ladder.SCORABLE_TIERS),
+        help=f"comma-separated, from {','.join(ladder.SCORABLE_TIERS)} (default: all); "
+        "live and judge are always not_run",
+    )
+    s.add_argument("--results", type=pathlib.Path, required=True)
+    s.set_defaults(func=cmd_score)
+
+    s = sub.add_parser(
+        "store", help="append scored records to a store, skipping ones already in it (GHA)"
+    )
+    s.add_argument("records", type=pathlib.Path, nargs="+")
+    s.add_argument("--results", type=pathlib.Path, default=DEFAULT_REAL_RESULTS)
+    s.set_defaults(func=cmd_store)
     return p
 
 

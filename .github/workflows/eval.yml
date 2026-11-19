@@ -1,0 +1,592 @@
+# The scheduled eval (PLAN §5, EGRESS.md): plan -> prep -> agent -> score -> store.
+#
+# - plan:  the planner picks this run's cells and emits them as a matrix,
+#          refused over config/plan.toml's [gha] max_cells.
+# - prep:  once, with GitHub access: fetches the golds (the private hedgedoc
+#          gold with HEDGEDOC_GOLD_TOKEN, in that step only), installs the
+#          harnesses at their pinned versions, uv, Node and the Pythons the
+#          tasks need, builds every cell's workspace, and uploads them.
+# - agent: per cell, harden-runner in block mode with no GitHub content hosts,
+#          no GitHub token, the OpenRouter key in the agent step only, the gold
+#          and this repo hidden from the agent by the harness's mount namespace.
+# - score: per cell, no model secrets: static (with charmcraft pack on LXD),
+#          oracle, process and the gold-copy checks. Live and judge stay not_run.
+# - store: appends the records to the `results` branch, one store at a time.
+#
+# Also callable (workflow_call) so egress-audit.yml can run one cell with the
+# agent job in audit mode.
+name: eval
+
+on:
+  schedule:
+    - cron: "17 3 * * 1" # weekly: a seeded sample of [gha] scheduled_sample cells
+    - cron: "41 2 3 * *" # monthly: the anchor set (PLAN §1.1)
+  workflow_dispatch:
+    inputs:
+      cells:
+        description: "Exact cell ids (task/harness/model/treatment/rep), comma-separated. Overrides the filters."
+        type: string
+        default: ""
+      task:
+        description: "Only these tasks (comma-separated; empty = all)"
+        type: string
+        default: ""
+      harness:
+        description: "Only these harnesses (comma-separated; empty = all)"
+        type: string
+        default: ""
+      model:
+        description: "Only these models (comma-separated; empty = all)"
+        type: string
+        default: ""
+      treatment:
+        description: "Only these treatments (comma-separated; empty = all)"
+        type: string
+        default: ""
+      reps:
+        description: "Reps per cell"
+        type: string
+        default: "1"
+      sample:
+        description: "Then take a seeded sample of this many (empty = all that match)"
+        type: string
+        default: "4"
+      max_cells:
+        description: "Refuse the run if it holds more cells than this (never above [gha] max_cells)"
+        type: string
+        default: "6"
+  workflow_call:
+    inputs:
+      cells:
+        type: string
+        required: true
+      egress_policy:
+        description: "The agent job's harden-runner policy: block, or audit (egress-audit.yml)"
+        type: string
+        default: block
+      max_cells:
+        type: string
+        default: "1"
+    secrets:
+      OPENROUTER_API_KEY:
+        required: true
+      HEDGEDOC_GOLD_TOKEN:
+        required: false
+      WOF_ARTIFACT_KEY:
+        required: false
+
+permissions: {}
+
+# One eval at a time (the spend is per run; the key's credit limit is the
+# ceiling), never cancelled part-way. egress-audit.yml has its own group.
+concurrency:
+  group: wof-eval
+  cancel-in-progress: false
+
+env:
+  UV_VERSION: "0.11.32"
+  NODE_VERSION: "22"
+  MONTHLY_CRON: "41 2 3 * *"
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+      - name: Plan
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          IN_CELLS: ${{ inputs.cells }}
+          IN_TASK: ${{ inputs.task }}
+          IN_HARNESS: ${{ inputs.harness }}
+          IN_MODEL: ${{ inputs.model }}
+          IN_TREATMENT: ${{ inputs.treatment }}
+          IN_REPS: ${{ inputs.reps }}
+          IN_SAMPLE: ${{ inputs.sample }}
+          IN_MAX_CELLS: ${{ inputs.max_cells }}
+        run: |
+          set -euo pipefail
+          args=(plan --matrix-json)
+          if [ "$EVENT" = schedule ]; then
+            if [ "$SCHEDULE" = "$MONTHLY_CRON" ]; then
+              args+=(--anchors-only --reps 1)
+            else
+              args+=(--sample --seed "$(date -u +%F)" --reps 1)
+            fi
+          elif [ -n "${IN_CELLS:-}" ]; then
+            args+=(--cells "$IN_CELLS")
+          else
+            [ -n "${IN_TASK:-}" ] && args+=(--task "$IN_TASK")
+            [ -n "${IN_HARNESS:-}" ] && args+=(--harness "$IN_HARNESS")
+            [ -n "${IN_MODEL:-}" ] && args+=(--model "$IN_MODEL")
+            [ -n "${IN_TREATMENT:-}" ] && args+=(--treatment "$IN_TREATMENT")
+            [ -n "${IN_REPS:-}" ] && args+=(--reps "$IN_REPS")
+            [ -n "${IN_SAMPLE:-}" ] && args+=(--sample "$IN_SAMPLE" --seed "$GITHUB_RUN_ID")
+          fi
+          [ -n "${IN_MAX_CELLS:-}" ] && args+=(--max-cells "$IN_MAX_CELLS")
+          matrix="$(uv run --frozen --no-dev wof "${args[@]}")"
+          count="$(jq '.include | length' <<<"$matrix")"
+          {
+            echo "matrix=$matrix"
+            echo "count=$count"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Plan: $count cells"
+            jq -r '.include[] | "- `\(.cell)`\(if .anchor then " (anchor)" else "" end)"' <<<"$matrix"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  prep:
+    name: prep (golds, tools, workspaces)
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.filter.outputs.matrix }}
+      count: ${{ steps.filter.outputs.count }}
+      harnesses: ${{ steps.filter.outputs.harnesses }}
+    env:
+      MATRIX: ${{ needs.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+      - name: The package, in the path every later job uses
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/wof"/{tools/bin,gold,ws,out/common,out/pi,out/omp,out/opencode}
+          git clone -q --no-hardlinks "$GITHUB_WORKSPACE" "$RUNNER_TEMP/wof/code"
+          git -C "$RUNNER_TEMP/wof/code" remote remove origin
+          echo "$MATRIX" > "$RUNNER_TEMP/wof/matrix.json"
+
+      # Golds first, before any harness's npm install scripts have run on this
+      # VM. The private gold's token is in this step's environment and nowhere
+      # else, and reaches git through GIT_CONFIG_* variables (charmer_wof.gold).
+      - name: Fetch the golds
+        env:
+          WOF_GOLD_TOKEN: ${{ secrets.HEDGEDOC_GOLD_TOKEN }}
+          HAS_ARTIFACT_KEY: ${{ secrets.WOF_ARTIFACT_KEY != '' }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/wof"
+          : > skipped-tasks
+          for task in $(jq -r '[.include[] | select(.kind == "feature") | .task] | unique | .[]' matrix.json); do
+            private="$(jq -r --arg t "$task" '[.include[] | select(.task == $t)][0].gold_private' matrix.json)"
+            if [ "$private" = true ] && [ "$HAS_ARTIFACT_KEY" != true ]; then
+              echo "::warning::skipping $task: its gold is private and WOF_ARTIFACT_KEY isn't set, so its workspace can't be passed on encrypted"
+              echo "$task" >> skipped-tasks
+              continue
+            fi
+            set +e
+            (cd code && uv run --frozen --no-dev wof fetch-gold "$task" --dest "$RUNNER_TEMP/wof/gold/$task")
+            rc=$?
+            set -e
+            if [ "$rc" = 3 ]; then
+              echo "::warning::skipping $task: its gold is private and HEDGEDOC_GOLD_TOKEN isn't set"
+              echo "$task" >> skipped-tasks
+            elif [ "$rc" != 0 ]; then
+              exit "$rc"
+            fi
+          done
+
+      - name: Drop the skipped cells
+        id: filter
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/wof"
+          matrix="$(jq -c --rawfile skip skipped-tasks \
+            '($skip | split("\n") | map(select(length > 0))) as $s
+             | {include: [.include[] | select(.task as $t | $s | index($t) | not)]}' matrix.json)"
+          echo "$matrix" > matrix.json
+          {
+            echo "matrix=$matrix"
+            echo "count=$(jq '.include | length' <<<"$matrix")"
+            echo "harnesses=$(jq -c '[.include[].harness] | unique' <<<"$matrix")"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.filter.outputs.count != '0'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+
+      - name: Tools (uv, Node, Pythons, the package's venv, the harnesses)
+        if: steps.filter.outputs.count != '0'
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/wof"
+          cp "$(command -v uv)" "$(command -v uvx)" tools/bin/
+          cp -a "$(dirname "$(dirname "$(command -v node)")")" tools/node
+          export PATH="$RUNNER_TEMP/wof/tools/bin:$RUNNER_TEMP/wof/tools/node/bin:$PATH"
+          # The agent job can't download Pythons (they come from GitHub), so
+          # install every one a task needs, plus the package's own, here.
+          export UV_PYTHON_INSTALL_DIR="$RUNNER_TEMP/wof/tools/python"
+          mapfile -t pythons < <(jq -r '[.include[].python | select(. != "")] | unique | .[]' matrix.json)
+          uv python install 3.12 "${pythons[@]}"
+          # The venv must point at a Python under tools/, which the agent job
+          # unpacks at the same path; the fetch step's venv may not.
+          rm -rf code/.venv
+          (cd code && uv sync --frozen --no-dev --python 3.12)
+          for h in $(jq -r '[.include[] | "\(.harness)=\(.harness_version)"] | unique | .[]' matrix.json); do
+            code/ci/install-harness.sh "${h%%=*}" "${h#*=}" "tools/${h%%=*}"
+            ln -sf "../${h%%=*}/bin/${h%%=*}" "tools/bin/${h%%=*}"
+          done
+
+      - name: Workspaces
+        if: steps.filter.outputs.count != '0'
+        env:
+          WOF_ARTIFACT_KEY: ${{ secrets.WOF_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/wof"
+          if jq -e '.include[] | select(.fetch_libs)' matrix.json > /dev/null; then
+            sudo snap install charmcraft --classic
+          fi
+          jq -c '.include[]' matrix.json | while read -r cell; do
+            id="$(jq -r .cell <<<"$cell")"; slug="$(jq -r .slug <<<"$cell")"; task="$(jq -r .task <<<"$cell")"
+            gold=()
+            [ -d "gold/$task" ] && gold=(--gold "$RUNNER_TEMP/wof/gold/$task")
+            (cd code && .venv/bin/wof prepare "$id" "${gold[@]}" --dest "$RUNNER_TEMP/wof/ws/$slug")
+            tar -C ws --zstd -cf "out/common/$slug.tar.zst" "$slug"
+            if [ "$(jq -r .gold_private <<<"$cell")" = true ]; then
+              # Artifacts of a public repo are public: a private gold's tree
+              # only leaves this job encrypted.
+              openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:WOF_ARTIFACT_KEY \
+                -in "out/common/$slug.tar.zst" -out "out/common/$slug.tar.zst.enc"
+              rm "out/common/$slug.tar.zst"
+            fi
+          done
+          rm -rf gold
+          tar --zstd -cf out/common/tools-common.tar.zst tools/bin tools/node tools/python code
+          for h in pi omp opencode; do
+            if [ -d "tools/$h" ]; then tar --zstd -cf "out/$h/tools-$h.tar.zst" "tools/$h"; fi
+          done
+          ls -laR out
+
+      # One artifact for what every agent job needs, one per harness, so an
+      # agent job downloads only its own harness (omp alone is ~290 MB).
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.filter.outputs.count != '0'
+        with:
+          name: wof-common
+          path: ${{ runner.temp }}/wof/out/common/
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: contains(fromJSON(steps.filter.outputs.harnesses || '[]'), 'pi')
+        with:
+          name: wof-tools-pi
+          path: ${{ runner.temp }}/wof/out/pi/
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: contains(fromJSON(steps.filter.outputs.harnesses || '[]'), 'omp')
+        with:
+          name: wof-tools-omp
+          path: ${{ runner.temp }}/wof/out/omp/
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: contains(fromJSON(steps.filter.outputs.harnesses || '[]'), 'opencode')
+        with:
+          name: wof-tools-opencode
+          path: ${{ runner.temp }}/wof/out/opencode/
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
+
+  agent:
+    needs: prep
+    if: needs.prep.outputs.count != '0'
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.prep.outputs.matrix) }}
+    name: agent ${{ matrix.cell }}
+    runs-on: ubuntu-24.04
+    # config/plan.toml caps a run at 30 minutes; plus setup, the generation
+    # lookup (up to ~3.5 minutes) and packing up.
+    timeout-minutes: 55
+    permissions: {}
+    steps:
+      # Block mode, no GitHub content hosts: no code search, no raw files, no
+      # clones (EGRESS.md, option 1). The allowlist starts from EGRESS.md's
+      # list; entries marked (audit) are the ones egress-audit.yml's report
+      # must confirm or correct.
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          # sudo stays enabled (the default): the sysctl step below needs it.
+          egress-policy: ${{ inputs.egress_policy || 'block' }}
+          allowed-endpoints: >
+            openrouter.ai:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            api.charmhub.io:443
+            storage.snapcraftcontent.com:443
+            models.dev:443
+            results-receiver.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443
+        # openrouter.ai: the model, and the adapters' generation lookup.
+        # pypi.org, files.pythonhosted.org: the agent's uv run / uvx (ops,
+        #   pytest, charmlint, charmcraft for fetch-lib).
+        # api.charmhub.io: charm libs (charmcraft fetch-lib[s]).
+        # storage.snapcraftcontent.com (audit): whatever Charmhub redirects to.
+        # models.dev (audit): OpenCode's model catalogue, if it fetches it.
+        # results-receiver..., *.blob.core.windows.net (audit): the artifact
+        #   service, for this job's own download and upload. Neither serves
+        #   repository content.
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wof-common
+          path: ${{ runner.temp }}/in
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wof-tools-${{ matrix.harness }}
+          path: ${{ runner.temp }}/in
+
+      - name: Unpack
+        env:
+          SLUG: ${{ matrix.slug }}
+          HARNESS: ${{ matrix.harness }}
+          WOF_ARTIFACT_KEY: ${{ secrets.WOF_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/wof/ws"
+          cd "$RUNNER_TEMP/wof"
+          tar --zstd -xf "$RUNNER_TEMP/in/tools-common.tar.zst"
+          tar --zstd -xf "$RUNNER_TEMP/in/tools-$HARNESS.tar.zst"
+          if [ -f "$RUNNER_TEMP/in/$SLUG.tar.zst.enc" ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:WOF_ARTIFACT_KEY \
+              -in "$RUNNER_TEMP/in/$SLUG.tar.zst.enc" | tar -C ws --zstd -xf -
+            touch "$RUNNER_TEMP/wof/encrypt-output"
+          else
+            tar -C ws --zstd -xf "$RUNNER_TEMP/in/$SLUG.tar.zst"
+          fi
+          rm -rf "$RUNNER_TEMP/in"
+
+      # Ubuntu 24.04's AppArmor restriction on unprivileged user namespaces
+      # breaks the harness's `unshare --map-root-user` (EGRESS.md); check-unshare.yml
+      # checks whether this line is what fixes it.
+      - name: Allow the harness's unprivileged mount namespace
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Agent
+        id: agent
+        env:
+          CELL: ${{ matrix.cell }}
+          SLUG: ${{ matrix.slug }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          set -uo pipefail
+          W="$RUNNER_TEMP/wof"
+          export PATH="$W/tools/bin:$W/tools/node/bin:$PATH"
+          export UV_PYTHON_INSTALL_DIR="$W/tools/python" UV_PYTHON_DOWNLOADS=never
+          # No GitHub credentials of any kind reach the agent (EGRESS.md).
+          env -u GITHUB_TOKEN -u GH_TOKEN -u ACTIONS_RUNTIME_TOKEN -u ACTIONS_RESULTS_URL \
+              -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL \
+            "$W/code/.venv/bin/wof" agent "$CELL" --workspace "$W/ws/$SLUG"
+          rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          # A refused or failed agent still hands on its workspace: scoring
+          # records whatever it left (or that it left nothing).
+          [ "$rc" = 0 ] || echo "::warning::wof agent exited $rc for $CELL"
+
+      - name: Pack up the agent's workspace
+        if: always() && steps.agent.outcome != 'skipped'
+        env:
+          SLUG: ${{ matrix.slug }}
+          WOF_ARTIFACT_KEY: ${{ secrets.WOF_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/wof"
+          mkdir -p out
+          # The agent's virtualenvs stay behind: scoring builds its own.
+          tar -C ws --zstd --exclude="$SLUG/.venv" --exclude="$SLUG/.tox" \
+            -cf "out/$SLUG.tar.zst" "$SLUG"
+          if [ -f encrypt-output ]; then
+            openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:WOF_ARTIFACT_KEY \
+              -in "out/$SLUG.tar.zst" -out "out/$SLUG.tar.zst.enc"
+            rm "out/$SLUG.tar.zst"
+          fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.agent.outcome != 'skipped'
+        with:
+          name: wof-out-${{ matrix.slug }}
+          path: ${{ runner.temp }}/wof/out/
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
+
+  score:
+    needs: [prep, agent]
+    if: always() && needs.prep.result == 'success' && needs.prep.outputs.count != '0'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prep.outputs.matrix) }}
+    name: score ${{ matrix.cell }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wof-out-${{ matrix.slug }}
+          path: ${{ runner.temp }}/in
+
+      - name: Unpack
+        env:
+          SLUG: ${{ matrix.slug }}
+          WOF_ARTIFACT_KEY: ${{ secrets.WOF_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/wof/ws"
+          if [ -f "$RUNNER_TEMP/in/$SLUG.tar.zst.enc" ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:WOF_ARTIFACT_KEY \
+              -in "$RUNNER_TEMP/in/$SLUG.tar.zst.enc" | tar -C "$RUNNER_TEMP/wof/ws" --zstd -xf -
+          else
+            tar -C "$RUNNER_TEMP/wof/ws" --zstd -xf "$RUNNER_TEMP/in/$SLUG.tar.zst"
+          fi
+          rm -rf "$RUNNER_TEMP/in"
+
+      # charmcraft and LXD the way concierge-based charm CI sets them up
+      # (concierge's presets; ci/concierge-pack.yaml is its `crafts` preset
+      # without Juju, snapcraft and rockcraft). The charm builds in the base its
+      # charmcraft.yaml names, so alertmanager's Python 3.14 comes from its
+      # ubuntu@26.04 build container, not from this runner.
+      - name: charmcraft and LXD (concierge)
+        run: |
+          set -euo pipefail
+          sudo snap install concierge --classic
+          sudo concierge prepare --config ci/concierge-pack.yaml
+          sudo usermod -aG lxd "$USER"
+          charmcraft version
+          sg lxd -c 'lxc list' > /dev/null
+
+      - name: Score
+        env:
+          CELL: ${{ matrix.cell }}
+          SLUG: ${{ matrix.slug }}
+        run: |
+          set -euo pipefail
+          uv sync --frozen --no-dev
+          mkdir -p "$RUNNER_TEMP/wof/records"
+          # sg: the lxd group membership from the step above, for charmcraft.
+          # The single quotes are deliberate: the inner shell expands the env.
+          # shellcheck disable=SC2016
+          sg lxd -c '.venv/bin/wof score "$CELL" --workspace "$RUNNER_TEMP/wof/ws/$SLUG" \
+            --tiers static,oracle,process,pack \
+            --results "$RUNNER_TEMP/wof/records/$SLUG.jsonl"' | tee "$RUNNER_TEMP/score.json"
+          jq -r '"- `\(.cell)`: \(.tiers | to_entries | map("\(.key) \(.value)") | join(", "))\(if (.review | length) > 0 then " **REVIEW: \(.review | join(", "))**" else "" end)"' \
+            "$RUNNER_TEMP/score.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wof-record-${{ matrix.slug }}
+          path: ${{ runner.temp }}/wof/records/
+          retention-days: 30
+          if-no-files-found: error
+
+  store:
+    name: store (results branch)
+    needs: [prep, score]
+    if: always() && needs.prep.result == 'success' && needs.prep.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # One store at a time across every run of this workflow, never cancelled,
+    # so concurrent runs can't clobber each other's appends.
+    concurrency:
+      group: wof-store
+      cancel-in-progress: false
+    permissions:
+      contents: write # push to the results branch
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: code
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wof-record-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/records
+      - name: Append to the results branch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          records=("$RUNNER_TEMP"/records/*.jsonl)
+          if [ ${#records[@]} = 0 ]; then
+            echo "::warning::no records to store (every score job failed?)"
+            exit 0
+          fi
+          (cd code && uv sync --frozen --no-dev)
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git config --global "http.https://github.com/.extraheader" "$auth"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3 4 5; do
+            rm -rf store
+            if git ls-remote --exit-code --heads "https://github.com/$REPO" results > /dev/null; then
+              git clone -q --depth 1 --branch results "https://github.com/$REPO" store
+            else
+              # First run: the branch starts from the records committed on main.
+              git init -q -b results store
+              git -C store remote add origin "https://github.com/$REPO"
+              mkdir -p store/results && cp -a code/results/. store/results/
+            fi
+            code/.venv/bin/wof --config code store "${records[@]}" --results store/results/results.jsonl
+            git -C store add results
+            if git -C store diff --cached --quiet; then
+              echo "nothing new to store"; break
+            fi
+            git -C store commit -q -m "results: ${#records[@]} record file(s) from $RUN_URL"
+            if git -C store push -q origin HEAD:results; then
+              echo "stored"; break
+            fi
+            echo "push failed (attempt $attempt); refetching and re-appending"
+            sleep $((attempt * 5))
+            [ "$attempt" = 5 ] && exit 1
+          done

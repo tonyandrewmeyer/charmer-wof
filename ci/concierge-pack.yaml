@@ -1,0 +1,19 @@
+# Concierge config for the score job's pack step (eval.yml): LXD as
+# charmcraft's build backend, and charmcraft. Adapted from concierge's
+# `crafts` preset (https://canonical.com/juju/docs/concierge/reference/presets/),
+# without Juju, snapcraft or rockcraft. As in its `k8s` preset, LXD is set up
+# but not bootstrapped for Juju: it's only there for charmcraft.
+#
+#   sudo concierge prepare --config ci/concierge-pack.yaml
+juju:
+  disable: true
+
+providers:
+  lxd:
+    enable: true
+    bootstrap: false
+
+host:
+  snaps:
+    charmcraft:
+      channel: latest/stable
