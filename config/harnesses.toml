@@ -1,0 +1,35 @@
+# Agent harnesses (PLAN §3.1). `version` is the pin; a run records the
+# version the adapter actually reports and refuses to run if they differ.
+# "unpinned" is allowed for planning and dry runs, and refused for real runs.
+# `adapter` names the adapter's module.
+
+# pi: installed with its standalone installer,
+#   curl -fsSL https://pi.dev/install.sh | sh
+# which pins pi's dependency tree but always installs the latest release, so
+# the adapter checks `pi --version` against this pin rather than installing
+# it. See HARNESS.md "pi" for the context mapping and the credentials rule.
+[harnesses.pi]
+version = "1.5.2"
+adapter = "charmer_wof.adapters.pi"
+
+# omp (oh-my-pi, https://github.com/can1357/oh-my-pi, a fork of pi): its README
+# recommends `curl -fsSL https://omp.sh/install | sh`, a prebuilt binary that
+# can be pinned with `sh -s -- --binary --ref v<version>`. On 2026-11-12 it was
+# installed with the README's documented bun alternative, pinned exactly:
+#   bun install -g @oh-my-pi/pi-coding-agent@18.19.0
+# (`omp --version` says omp/18.19.0; the adapter compares the number). See
+# HARNESS.md "omp" for why, the context mapping and the credentials rule.
+[harnesses.omp]
+version = "18.19.0"
+adapter = "charmer_wof.adapters.omp"
+
+# OpenCode (https://opencode.ai, https://github.com/anomalyco/opencode, formerly
+# sst/opencode), V2. Its README's package-manager install, pinned exactly:
+#   npm install --prefix ~/.local/opencode @opencode/cli@2.2.6
+#   ln -s ~/.local/opencode/node_modules/.bin/opencode ~/.local/bin/opencode
+# (`opencode --version` says `opencode v2.2.6`). 2.3.0 was the latest on
+# 2026-11-13 but only hours old; see HARNESS.md "OpenCode" for why 2.2.6, the
+# context mapping and the credentials rule.
+[harnesses.opencode]
+version = "2.2.6"
+adapter = "charmer_wof.adapters.opencode"

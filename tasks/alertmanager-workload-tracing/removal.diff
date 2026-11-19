@@ -1,0 +1,390 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+new file mode 100644
+index 0000000..9c72495
+--- /dev/null
++++ b/CLAUDE.md
+@@ -0,0 +1,14 @@
++# alertmanager-k8s
++
++A Kubernetes charm for Prometheus Alertmanager, written with the `ops`
++library. The charm source is in `src/` (`charm.py` for the Juju side,
++`alertmanager.py` for the workload and its Pebble layer, `config_builder.py`
++for rendering `alertmanager.yml`), unit tests (ops.testing / Scenario) in
++`tests/unit/`, integration tests in `tests/integration/`. Charm libraries
++fetched with `charmcraft fetch-lib` live under `lib/`.
++
++## Commands
++
++- Unit tests: `tox -e unit` (or `JUJU_VERSION=3.0.3 PYTHONPATH=.:lib:src uv run --extra dev pytest tests/unit`)
++- Lint: `tox -e lint`
++- Charm linter: `uvx charmlint .`
+diff --git a/charmcraft.yaml b/charmcraft.yaml
+index af596d1..a3ca91b 100644
+--- a/charmcraft.yaml
++++ b/charmcraft.yaml
+@@ -130,12 +130,6 @@ requires:
+     limit: 1
+     description: |
+       Certificate and key files for the alertmanager server to use to authenticate to client.
+-  tracing:
+-    interface: tracing
+-    optional: true
+-    limit: 1
+-    description: |
+-      Enables sending workload traces to a distributed tracing backend such as Tempo.
+   charm-tracing:
+     interface: tracing
+     optional: true
+diff --git a/src/alertmanager.py b/src/alertmanager.py
+index e65bc97..391f802 100644
+--- a/src/alertmanager.py
++++ b/src/alertmanager.py
+@@ -228,13 +228,6 @@ class WorkloadManager(Object):
+                 "https_proxy": os.environ.get("JUJU_CHARM_HTTPS_PROXY", ""),
+                 "http_proxy": os.environ.get("JUJU_CHARM_HTTP_PROXY", ""),
+                 "no_proxy": os.environ.get("JUJU_CHARM_NO_PROXY", ""),
+-                "OTEL_RESOURCE_ATTRIBUTES": (
+-                    f"juju_application={self._topology.application},"
+-                    f"juju_model={self._topology.model},"
+-                    f"juju_model_uuid={self._topology.model_uuid},"
+-                    f"juju_unit={self._topology.unit},"
+-                    f"juju_charm={self._topology.charm_name}"
+-                ),
+             }
+ 
+         return Layer(
+diff --git a/src/charm.py b/src/charm.py
+index 86a646a..50efc2b 100755
+--- a/src/charm.py
++++ b/src/charm.py
+@@ -35,7 +35,6 @@ from charms.observability_libs.v0.kubernetes_compute_resources_patch import (
+     adjust_resource_requirements,
+ )
+ from charms.prometheus_k8s.v0.prometheus_scrape import MetricsEndpointProvider
+-from charms.tempo_coordinator_k8s.v0.tracing import TracingEndpointRequirer
+ from charms.tls_certificates_interface.v4.tls_certificates import (
+     CertificateRequestAttributes,
+     TLSCertificatesRequiresV4,
+@@ -186,7 +185,6 @@ class AlertmanagerCharm(CharmBase):
+                 self._cert_requirer.on.certificate_available,  # pyright: ignore
+             ],
+         )
+-        self.workload_tracing = TracingEndpointRequirer(self, protocols=["otlp_http"])
+         self.charm_tracing = ops_tracing.Tracing(
+             self,
+             tracing_relation_name="charm-tracing",
+@@ -252,14 +250,6 @@ class AlertmanagerCharm(CharmBase):
+             self._on_remote_configuration_changed,
+         )
+ 
+-        # Workload tracing relation events
+-        self.framework.observe(
+-            self.on["tracing"].relation_changed, self._on_workload_tracing_changed
+-        )
+-        self.framework.observe(
+-            self.on["tracing"].relation_broken, self._on_workload_tracing_changed
+-        )
+-
+         # Peer relation events
+         self.framework.observe(
+             self.on[self._relations.peer].relation_joined, self._on_peer_relation_joined
+@@ -454,8 +444,6 @@ class AlertmanagerCharm(CharmBase):
+     def _render_manifest(self) -> ConfigFileSystemState:
+         raw_config, raw_templates = self._get_raw_config_and_templates()
+ 
+-        tracing_endpoint = self._workload_tracing_endpoint
+-
+         # Note: A free function (with many args) would have the same functionality.
+         config_suite = (
+             ConfigBuilder(api_port=self.api_port)
+@@ -464,7 +452,6 @@ class AlertmanagerCharm(CharmBase):
+                 cert_file_path=self._server_cert_path, key_file_path=self._key_path
+             )
+             .set_templates(raw_templates, self._templates_path)
+-            .set_workload_tracing(endpoint=tracing_endpoint, ca_cert_path=self._ca_cert_path)
+             .build()
+         )
+         tls_config = self._tls_config
+@@ -596,10 +583,6 @@ class AlertmanagerCharm(CharmBase):
+         """Event handler for remote configuration's RelationChangedEvent."""
+         self._common_exit_hook()
+ 
+-    def _on_workload_tracing_changed(self, _):
+-        """Event handler for workload tracing relation changes."""
+-        self._common_exit_hook()
+-
+     def _on_update_status(self, _):
+         """Event handler for UpdateStatusEvent.
+ 
+@@ -681,14 +664,6 @@ class AlertmanagerCharm(CharmBase):
+ 
+         return hostnames
+ 
+-    @property
+-    def _workload_tracing_endpoint(self) -> Optional[str]:
+-
+-        if not self.workload_tracing.is_ready():
+-            return None
+-        return self.workload_tracing.get_endpoint("otlp_http")
+-
+-
+     @property
+     def _tls_config(self) -> Optional[TLSConfig]:
+         certificates, key = self._cert_requirer.get_assigned_certificate(
+diff --git a/src/config_builder.py b/src/config_builder.py
+index 9eec3b3..26448dd 100644
+--- a/src/config_builder.py
++++ b/src/config_builder.py
+@@ -6,7 +6,6 @@
+ import logging
+ from dataclasses import dataclass
+ from typing import Optional
+-from urllib.parse import urlparse
+ 
+ import yaml
+ 
+@@ -61,10 +60,6 @@ class ConfigBuilder:
+         self._cert_file_path = None
+         self._key_file_path = None
+ 
+-        self._tracing_endpoint: Optional[str] = None
+-        self._tracing_insecure: bool = False
+-        self._tracing_ca_cert_path: Optional[str] = None
+-
+     def set_config(self, config: Optional[dict]):
+         """Set the main config file contents."""
+         if config is not None:
+@@ -79,33 +74,6 @@ class ConfigBuilder:
+                 self._templates_path = path
+         return self
+ 
+-    def set_workload_tracing(
+-        self, *, endpoint: Optional[str], ca_cert_path: str
+-    ) -> "ConfigBuilder":
+-        """Set workload tracing config.
+-
+-        Parses the full URL provided by the tracing relation and derives the
+-        ``host:port`` endpoint and ``insecure`` flag from it.
+-        Alertmanager's ``tracing.endpoint`` must not include a scheme or path;
+-        the scheme is expressed as ``insecure: true`` (HTTP) or omitted (HTTPS).
+-
+-        Args:
+-            endpoint: Full OTLP HTTP URL from the tracing relation.
+-                Pass ``None`` to leave tracing unconfigured.
+-            ca_cert_path: Path to a CA certificate file inside the workload container,
+-                used for TLS verification when ``endpoint`` uses ``https``.
+-        """
+-        if endpoint is None:
+-            return self
+-        parsed = urlparse(endpoint)
+-        # Alertmanager expects `host:port`, not a full URL with scheme+path.
+-        self._tracing_endpoint = parsed.netloc
+-        # insecure: true signals plain HTTP; false (default) means TLS is expected.
+-        self._tracing_insecure = parsed.scheme == "http"
+-        if not self._tracing_insecure:
+-            self._tracing_ca_cert_path = ca_cert_path
+-        return self
+-
+     def set_tls_server_config(self, *, cert_file_path: str, key_file_path: str):
+         """Set TLS server config."""
+         self._cert_file_path = cert_file_path
+@@ -140,17 +108,6 @@ class ConfigBuilder:
+         route["group_by"] = sorted(group_by)
+         config["route"] = route
+ 
+-        if self._tracing_endpoint:
+-            tracing_cfg: dict = {
+-                "client_type": "http",
+-                "endpoint": self._tracing_endpoint,
+-                "sampling_fraction": 1.0,
+-                "insecure": self._tracing_insecure,
+-            }
+-            if self._tracing_ca_cert_path:
+-                tracing_cfg["tls_config"] = {"ca_file": self._tracing_ca_cert_path}
+-            config["tracing"] = tracing_cfg
+-
+         return yaml.safe_dump(config)
+ 
+     @property
+diff --git a/tests/unit/test_workload_tracing.py b/tests/unit/test_workload_tracing.py
+deleted file mode 100644
+index a91cbe0..0000000
+--- a/tests/unit/test_workload_tracing.py
++++ /dev/null
+@@ -1,176 +0,0 @@
+-# Copyright 2025 Canonical Ltd.
+-# See LICENSE file for licensing details.
+-
+-"""Feature: alertmanager sends workload traces to a related tempo."""
+-
+-import dataclasses
+-import json
+-
+-import pytest
+-import yaml
+-from helpers import workload_file
+-from ops.testing import Context, Relation, State
+-
+-from config_builder import ConfigBuilder
+-
+-TEMPO_HOST = "tempo-0.tempo-endpoints.cos.svc.cluster.local:4318"
+-
+-
+-def receivers(scheme: str) -> str:
+-    return json.dumps(
+-        [
+-            {
+-                "protocol": {"name": "otlp_http", "type": "http"},
+-                "url": f"{scheme}://{TEMPO_HOST}/v1/traces",
+-            }
+-        ]
+-    )
+-
+-
+-def tracing_relation(scheme: str) -> Relation:
+-    return Relation(
+-        "tracing", remote_app_name="tempo", remote_app_data={"receivers": receivers(scheme)}
+-    )
+-
+-
+-def rendered_config(context: Context, state: State, alertmanager_charm) -> dict:
+-    return yaml.safe_load(workload_file(context, state, alertmanager_charm._config_path))
+-
+-
+-class TestConfigBuilder:
+-    """The tracing section of the config, built in isolation from the charm."""
+-
+-    def test_no_tracing_section_when_tracing_is_not_configured(self):
+-        # GIVEN a config where tracing is never configured
+-        # WHEN the config is built
+-        config = yaml.safe_load(ConfigBuilder().build().alertmanager)
+-
+-        # THEN it has no tracing section
+-        assert "tracing" not in config
+-
+-    def test_no_tracing_section_when_there_is_no_endpoint(self):
+-        # GIVEN a config with no tracing endpoint
+-        # WHEN the config is built
+-        config = yaml.safe_load(
+-            ConfigBuilder().set_workload_tracing(endpoint=None, ca_cert_path="").build().alertmanager
+-        )
+-
+-        # THEN it has no tracing section
+-        assert "tracing" not in config
+-
+-    def test_an_http_endpoint_is_traced_insecurely(self):
+-        # GIVEN a plain HTTP tracing endpoint
+-        # WHEN the config is built
+-        config = yaml.safe_load(
+-            ConfigBuilder()
+-            .set_workload_tracing(endpoint=f"http://{TEMPO_HOST}/v1/traces", ca_cert_path="")
+-            .build()
+-            .alertmanager
+-        )
+-
+-        # THEN traces are sent to host:port over an insecure connection, with no TLS config
+-        assert config["tracing"] == {
+-            "client_type": "http",
+-            "endpoint": TEMPO_HOST,
+-            "sampling_fraction": 1.0,
+-            "insecure": True,
+-        }
+-
+-    def test_an_https_endpoint_is_traced_against_a_ca_certificate(self):
+-        # GIVEN an HTTPS tracing endpoint and a CA certificate
+-        ca_path = "/etc/ssl/certs/ca-certificates.crt"
+-
+-        # WHEN the config is built
+-        config = yaml.safe_load(
+-            ConfigBuilder()
+-            .set_workload_tracing(endpoint=f"https://{TEMPO_HOST}/v1/traces", ca_cert_path=ca_path)
+-            .build()
+-            .alertmanager
+-        )
+-
+-        # THEN traces are sent securely and verified against that CA
+-        assert config["tracing"] == {
+-            "client_type": "http",
+-            "endpoint": TEMPO_HOST,
+-            "sampling_fraction": 1.0,
+-            "insecure": False,
+-            "tls_config": {"ca_file": ca_path},
+-        }
+-
+-
+-def test_workload_config_has_no_tracing_section_without_a_tracing_relation(
+-    context: Context, base_state: State, alertmanager_charm
+-):
+-    # GIVEN a charm with no tracing relation
+-    # WHEN the charm reconciles
+-    state = context.run(context.on.config_changed(), base_state)
+-
+-    # THEN the workload config has no tracing section
+-    assert "tracing" not in rendered_config(context, state, alertmanager_charm)
+-
+-
+-def test_an_http_tempo_endpoint_is_written_to_the_workload_config(
+-    context: Context, base_state: State, alertmanager_charm
+-):
+-    # GIVEN a charm related to a tempo serving OTLP over HTTP
+-    relation = tracing_relation("http")
+-    state_in = dataclasses.replace(base_state, relations=[*base_state.relations, relation])
+-
+-    # WHEN the charm reconciles
+-    state = context.run(context.on.relation_changed(relation), state_in)
+-
+-    # THEN the workload traces to tempo over an insecure connection
+-    tracing = rendered_config(context, state, alertmanager_charm)["tracing"]
+-    assert tracing["client_type"] == "http"
+-    assert tracing["endpoint"] == TEMPO_HOST
+-    assert tracing["insecure"] is True
+-    assert "tls_config" not in tracing
+-
+-
+-def test_an_https_tempo_endpoint_is_written_to_the_workload_config(
+-    context: Context, base_state: State, alertmanager_charm
+-):
+-    # GIVEN a charm related to a tempo serving OTLP over HTTPS
+-    relation = tracing_relation("https")
+-    state_in = dataclasses.replace(base_state, relations=[*base_state.relations, relation])
+-
+-    # WHEN the charm reconciles
+-    state = context.run(context.on.relation_changed(relation), state_in)
+-
+-    # THEN the workload traces to tempo securely, verifying against a CA certificate
+-    tracing = rendered_config(context, state, alertmanager_charm)["tracing"]
+-    assert tracing["endpoint"] == TEMPO_HOST
+-    assert tracing["insecure"] is False
+-    assert "ca_file" in tracing["tls_config"]
+-
+-
+-def test_tracing_is_removed_from_the_workload_config_when_tempo_goes_away(
+-    context: Context, base_state: State, alertmanager_charm
+-):
+-    # GIVEN a charm that is tracing to tempo
+-    relation = tracing_relation("http")
+-    state_in = dataclasses.replace(base_state, relations=[*base_state.relations, relation])
+-    state = context.run(context.on.relation_changed(relation), state_in)
+-    assert "tracing" in rendered_config(context, state, alertmanager_charm)
+-
+-    # WHEN the tracing relation is broken, which it departs during, not before
+-    state = context.run(context.on.relation_broken(state.get_relation(relation.id)), state)
+-
+-    # THEN the workload no longer traces
+-    assert "tracing" not in rendered_config(context, state, alertmanager_charm)
+-
+-
+-@pytest.mark.parametrize(
+-    "topology_key",
+-    ["juju_application", "juju_model", "juju_model_uuid", "juju_unit", "juju_charm"],
+-)
+-def test_workload_traces_are_labelled_with_juju_topology(
+-    context: Context, base_state: State, topology_key: str
+-):
+-    # GIVEN a ready charm
+-    # WHEN the charm reconciles
+-    state = context.run(context.on.config_changed(), base_state)
+-
+-    # THEN the workload is started with juju topology in its OTEL resource attributes
+-    environment = state.get_container("alertmanager").plan.services["alertmanager"].environment
+-    assert f"{topology_key}=" in environment["OTEL_RESOURCE_ATTRIBUTES"]

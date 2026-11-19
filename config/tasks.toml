@@ -1,0 +1,316 @@
+# Tasks (PLAN §2). Paths are relative to the root of the config tree that
+# declares the task (this package for public tasks; the private repo for
+# held-out ones, PLAN §8 2026-11-09). Bump `version` whenever anything the
+# agent sees or the oracle checks changes: the prompt, the removal diff, the
+# gold SHA, the oracle files or the static checks.
+
+[tasks.hedgedoc-ingress]
+# v2 (2026-11-17): transcripts/ removed from the workspace; it holds the
+# sessions that built the gold, strip_prefix=True included (PLAN §7).
+version = "2"
+kind = "feature"
+held_out = false
+description = """
+§9 task T2: the hedgedoc-operator exemplar with ingress (traefik_k8s ingress
+v2) surgically removed; the agent puts it back so HedgeDoc works under
+Traefik's /<model>-<app> prefix.
+"""
+gold_repo = "https://github.com/tonyandrewmeyer/hedgedoc-operator"
+# The oldest commit the recorded removal diff applies to cleanly; the §9
+# reference-t2 tree was copied on 2026-09-21 and matches it.
+gold_sha = "85cec91dfa3b1ce8f74f1ede836ede1bd45e5b9b"
+# Applied with `git apply -p1` to the gold checkout (paths are
+# reference-t2/... -> base-t2/...). The diff was made with -x lib, so the
+# vendored library is removed separately via remove_paths. It also adds the
+# agent context file (CLAUDE.md): see context_file.
+removal_diff = "tasks/hedgedoc-ingress/removal.diff"
+removal_strip = 1
+remove_paths = ["lib/charms/traefik_k8s/v2/ingress.py", "transcripts"]
+prompt = "tasks/hedgedoc-ingress/prompt.md"
+# The context file the removal diff creates. Treatments append to it; a
+# harness adapter that reads AGENTS.md instead links or copies it (phase 1).
+context_file = "CLAUDE.md"
+# The charm runs on Ubuntu 24.04 (Python 3.12). Without a pin uv builds the
+# charm's venv with whatever Python is about, and on 3.11 the gold's own
+# filterwarnings=error turns an opentelemetry DeprecationWarning into a
+# collection error for every test.
+python = "3.12"
+judge_criteria = "tasks/hedgedoc-ingress/judge-criteria.md"
+
+[tasks.hedgedoc-ingress.oracle]
+# Copied into install_dir after the agent finishes, run with the charm's own
+# environment, and removed again. Results come from JUnit XML; tests whose
+# classname contains `marker` are the oracle, the rest are the agent's own.
+files = [
+    "tasks/hedgedoc-ingress/oracle/test__oracle_ingress.py",
+    "tasks/hedgedoc-ingress/oracle/test__oracle_ingress_exemplar.py",
+]
+install_dir = "tests/unit"
+command = ["uv", "run", "--no-progress", "pytest", "tests/unit", "-q", "-p", "no:cacheprovider"]
+marker = "test__oracle_"
+# Tests reported individually in the record, because the pass count
+# saturates at the frontier (§9.1) and these are the discriminating ones.
+key_tests = ["test_oracle_requirer_asks_traefik_to_strip_the_prefix"]
+# The test that checks the feature itself; failing it tags the oracle tier
+# key-oracle-test-failed whatever the rest scored. HedgeDoc 1.x serves from /
+# and only uses CMD_URL_PATH to build links, so behind Traefik's
+# /<model>-<app> prefix it works only if Traefik strips the prefix: without
+# strip-prefix every request 404s, however right the domain, scheme and path
+# settings are. It's also the round-2 / §9 miss (HARNESS.md).
+key_test = "test_oracle_requirer_asks_traefik_to_strip_the_prefix"
+
+[tasks.hedgedoc-ingress.static_checks]
+endpoints = [{ name = "ingress", interface = "ingress", role = "requires" }]
+charm_libs = [{ lib = "traefik_k8s.ingress", version = "2" }]
+files_present = ["lib/charms/traefik_k8s/v2/ingress.py"]
+
+# --- task set v1 (2026-11-17, PLAN §7) ------------------------------------
+
+[tasks.alertmanager-workload-tracing]
+version = "1"
+kind = "feature"
+held_out = false
+description = """
+alertmanager-k8s (Observability) with workload tracing removed: the `tracing`
+endpoint (tempo_coordinator_k8s tracing v0, otlp_http), the `tracing:` section
+of alertmanager.yml, and OTEL_RESOURCE_ATTRIBUTES on the workload. Observability
+feature, K8s charm, added upstream 2026-05-27.
+"""
+gold_repo = "https://github.com/canonical/alertmanager-k8s-operator"
+gold_sha = "2a9d804e25bc6dbe786859134482980d3f78712a"
+removal_diff = "tasks/alertmanager-workload-tracing/removal.diff"
+removal_strip = 1
+remove_paths = ["lib/charms/tempo_coordinator_k8s/v0/tracing.py"]
+prompt = "tasks/alertmanager-workload-tracing/prompt.md"
+context_file = "CLAUDE.md"
+# requires-python = "~=3.14.0"
+python = "3.14"
+judge_criteria = "tasks/alertmanager-workload-tracing/judge-criteria.md"
+
+[tasks.alertmanager-workload-tracing.oracle]
+# The gold's tests/unit/test_workload_tracing.py minus its TestConfigBuilder
+# class, which calls ConfigBuilder.set_workload_tracing(endpoint=, ca_cert_path=)
+# directly; the rest go through ops.testing and the rendered config file. Uses
+# the gold's own conftest fixtures and helpers.workload_file, which stay in the base.
+files = ["tasks/alertmanager-workload-tracing/oracle/test__oracle_workload_tracing.py"]
+install_dir = "tests/unit"
+# tox.ini [testenv:unit]: JUJU_VERSION and PYTHONPATH come from tox.
+command = [
+    "env", "JUJU_VERSION=3.0.3", "PYTHONPATH=.:lib:src",
+    "uv", "run", "--no-progress", "--frozen", "--extra", "dev",
+    "pytest", "tests/unit", "-q", "-p", "no:cacheprovider",
+]
+marker = "test__oracle_"
+key_tests = [
+    "test_oracle_an_http_tempo_endpoint_is_written_to_the_workload_config",
+    "test_oracle_an_https_tempo_endpoint_is_written_to_the_workload_config",
+]
+# The relation's URL reaching alertmanager.yml as host:port is the feature;
+# the no-relation test passes on the base by construction.
+key_test = "test_oracle_an_http_tempo_endpoint_is_written_to_the_workload_config"
+
+[tasks.alertmanager-workload-tracing.static_checks]
+endpoints = [{ name = "tracing", interface = "tracing", role = "requires" }]
+files_present = ["lib/charms/tempo_coordinator_k8s/v0/tracing.py"]
+# The gold's own lint (tox -e lint) covers src/ and tests/, not the vendored libs.
+ruff_exclude = ["lib"]
+
+[tasks.haproxy-client-ip-hash-salt]
+version = "1"
+kind = "feature"
+held_out = false
+description = """
+haproxy (IS, machine charm) with the `client-ip-hash-salt` secret config option
+removed: salted SHA-256 client addresses in HAProxy's log formats, validation of
+the secret with blocked statuses, secret_changed, and redaction in the
+get-configuration action. Secret-backed config feature, added upstream 2026-08-28.
+"""
+gold_repo = "https://github.com/canonical/haproxy-operator"
+gold_sha = "1cab0e2afcc079b25ec1d8b6019f9eb1077585c7"
+# A monorepo: the charm is haproxy-operator/, and the workspace is that alone.
+gold_subdir = "haproxy-operator"
+removal_diff = "tasks/haproxy-client-ip-hash-salt/removal.diff"
+removal_strip = 1
+prompt = "tasks/haproxy-client-ip-hash-salt/prompt.md"
+context_file = "CLAUDE.md"
+python = "3.12"
+judge_criteria = "tasks/haproxy-client-ip-hash-salt/judge-criteria.md"
+
+[tasks.haproxy-client-ip-hash-salt.oracle]
+# The five black-box tests from the gold's tests/unit/test_charm.py (11 cases),
+# with the two conftest constants they use inlined. The removal also drops the
+# gold's tests of internal state/template APIs (test_state.py,
+# test_haproxy_service.py), which aren't in the oracle: they pin internal names.
+files = ["tasks/haproxy-client-ip-hash-salt/oracle/test__oracle_client_ip_hash_salt.py"]
+install_dir = "tests/unit"
+command = [
+    "env", "PYTHONPATH=.:lib:src",
+    "uv", "run", "--no-progress", "--frozen", "--group", "unit",
+    "pytest", "tests/unit", "-q", "-p", "no:cacheprovider",
+]
+marker = "test__oracle_"
+key_tests = [
+    "test_oracle_config_changed_client_ip_hash_salt[salt_configured]",
+    "test_oracle_get_configuration_redacts_log_hash_salt",
+]
+# The hash in the rendered config is the feature; salt_removed passes on the
+# base by construction.
+key_test = "test_oracle_config_changed_client_ip_hash_salt[salt_configured]"
+
+[tasks.haproxy-client-ip-hash-salt.static_checks]
+config_options = ["client-ip-hash-salt"]
+
+[tasks.haproxy-get-configuration]
+version = "1"
+kind = "feature"
+held_out = false
+description = """
+haproxy (IS, machine charm) with the `get-configuration` action removed: return
+the on-disk haproxy.cfg (salt-redacted), fail when it's missing, and note when
+it's the default configuration. Action feature, added upstream 2026-08-19.
+The base keeps HAProxyService.render_default_config (added for the action) and
+the salt-redaction helper (added later, with client-ip-hash-salt), both now
+unused, so the agent has the pieces the gold's tests patch.
+"""
+gold_repo = "https://github.com/canonical/haproxy-operator"
+gold_sha = "1cab0e2afcc079b25ec1d8b6019f9eb1077585c7"
+gold_subdir = "haproxy-operator"
+removal_diff = "tasks/haproxy-get-configuration/removal.diff"
+removal_strip = 1
+prompt = "tasks/haproxy-get-configuration/prompt.md"
+context_file = "CLAUDE.md"
+python = "3.12"
+judge_criteria = "tasks/haproxy-get-configuration/judge-criteria.md"
+
+[tasks.haproxy-get-configuration.oracle]
+# The gold's five get-configuration tests from tests/unit/test_charm.py (6
+# cases). They patch charm.file_exists, charm.read_file,
+# charm.HAProxyService.render_default_config and charm.CharmState.from_charm,
+# so the action has to use those names from the charm module.
+files = ["tasks/haproxy-get-configuration/oracle/test__oracle_get_configuration.py"]
+install_dir = "tests/unit"
+command = [
+    "env", "PYTHONPATH=.:lib:src",
+    "uv", "run", "--no-progress", "--frozen", "--group", "unit",
+    "pytest", "tests/unit", "-q", "-p", "no:cacheprovider",
+]
+marker = "test__oracle_"
+key_tests = [
+    "test_oracle_get_configuration_returns_disk_config",
+    "test_oracle_get_configuration_redacts_log_hash_salt",
+]
+key_test = "test_oracle_get_configuration_returns_disk_config"
+
+[tasks.haproxy-get-configuration.static_checks]
+actions = ["get-configuration"]
+
+[tasks.hedgedoc-s3]
+version = "1"
+kind = "feature"
+held_out = false
+description = """
+The hedgedoc-operator exemplar (the hedgedoc-ingress gold) with S3 object
+storage removed: the `s3` endpoint (data_platform_libs s3 v0), the CMD_S3_*
+environment, and the "relation without credentials pushes nothing" rule.
+Database/S3-relation feature, K8s charm. The charm's docs (README,
+docs/how-to/store-uploads-in-object-storage.md) still describe it, as the
+ingress task's docs do.
+"""
+gold_repo = "https://github.com/tonyandrewmeyer/hedgedoc-operator"
+gold_sha = "85cec91dfa3b1ce8f74f1ede836ede1bd45e5b9b"
+removal_diff = "tasks/hedgedoc-s3/removal.diff"
+removal_strip = 1
+# transcripts/ holds the sessions that built the charm (feature code included).
+remove_paths = ["lib/charms/data_platform_libs/v0/s3.py", "transcripts"]
+prompt = "tasks/hedgedoc-s3/prompt.md"
+context_file = "CLAUDE.md"
+python = "3.12"
+judge_criteria = "tasks/hedgedoc-s3/judge-criteria.md"
+
+[tasks.hedgedoc-s3.oracle]
+# The charm's three S3 tests from tests/unit/test_charm.py, with that file's
+# fixtures. test_hedgedoc.py's test_s3_overrides_upload_type is removed from the
+# base but not in the oracle: it pins the S3Parameters dataclass.
+files = ["tasks/hedgedoc-s3/oracle/test__oracle_s3.py"]
+install_dir = "tests/unit"
+command = ["uv", "run", "--no-progress", "pytest", "tests/unit", "-q", "-p", "no:cacheprovider"]
+marker = "test__oracle_"
+key_tests = [
+    "test_oracle_s3_relation_sets_upload_environment",
+    "test_oracle_incomplete_s3_relation_does_not_fall_back_to_the_filesystem",
+]
+key_test = "test_oracle_incomplete_s3_relation_does_not_fall_back_to_the_filesystem"
+
+[tasks.hedgedoc-s3.static_checks]
+endpoints = [{ name = "s3", interface = "s3", role = "requires" }]
+charm_libs = [{ lib = "data_platform_libs.s3", version = "0" }]
+files_present = ["lib/charms/data_platform_libs/v0/s3.py"]
+
+# New-charm briefs (PLAN §2.2). The workspace starts empty apart from the
+# starter's context file. Live deploy is phase 3; offline, scoring is the
+# static tier and a generic ops.testing oracle that finds the charm class in
+# src/charm.py and checks only what the brief asks for.
+
+[tasks.new-gotify-k8s]
+version = "1"
+kind = "new-charm"
+held_out = false
+description = """
+A K8s charm for Gotify server from a brief. No charm for it on Charmhub
+(checked 2026-11-17), so no gold to copy: the no-reference-exists case of §2.3.
+Config to environment, a secret-backed password, storage, statuses.
+"""
+prompt = "tasks/new-gotify-k8s/prompt.md"
+starter = "tasks/new-gotify-k8s/starter"
+context_file = "CLAUDE.md"
+python = "3.12"
+
+[tasks.new-gotify-k8s.oracle]
+files = ["tasks/new-gotify-k8s/oracle/test__oracle_gotify.py"]
+install_dir = "tests/unit"
+# The agent's own project, plus what the oracle needs if the project lacks it.
+command = [
+    "uv", "run", "--no-progress", "--with", "ops[testing]", "--with", "pytest", "--with", "pyyaml",
+    "pytest", "tests/unit", "-q", "-p", "no:cacheprovider",
+]
+marker = "test__oracle_"
+key_tests = [
+    "test_oracle_admin_password_comes_from_the_secret",
+    "test_oracle_pebble_ready_starts_gotify",
+]
+key_test = "test_oracle_admin_password_comes_from_the_secret"
+
+[tasks.new-gotify-k8s.static_checks]
+config_options = ["port", "registration", "admin-password"]
+files_present = ["src/charm.py", "pyproject.toml"]
+
+[tasks.new-pushgateway-k8s]
+version = "1"
+kind = "new-charm"
+held_out = false
+description = """
+A K8s charm for Prometheus Pushgateway from a brief. A Canonical charm exists
+(canonical/prometheus-pushgateway-k8s-operator; the oracle passes 5/5 against
+it at a9143e204b6e48c9420bfe114a2680259ce10635), so this is the gold-exists
+case of §2.2: the brief is a subset of what that charm does.
+"""
+gold_repo = "https://github.com/canonical/prometheus-pushgateway-k8s-operator"
+prompt = "tasks/new-pushgateway-k8s/prompt.md"
+starter = "tasks/new-pushgateway-k8s/starter"
+context_file = "CLAUDE.md"
+python = "3.12"
+
+[tasks.new-pushgateway-k8s.oracle]
+files = ["tasks/new-pushgateway-k8s/oracle/test__oracle_pushgateway.py"]
+install_dir = "tests/unit"
+command = [
+    "uv", "run", "--no-progress", "--with", "ops[testing]", "--with", "pytest", "--with", "pyyaml",
+    "pytest", "tests/unit", "-q", "-p", "no:cacheprovider",
+]
+marker = "test__oracle_"
+key_tests = ["test_oracle_scrape_job_targets_port_9091", "test_oracle_pebble_ready_starts_pushgateway_with_persistence"]
+key_test = "test_oracle_scrape_job_targets_port_9091"
+
+[tasks.new-pushgateway-k8s.static_checks]
+endpoints = [{ name = "metrics-endpoint", interface = "prometheus_scrape", role = "provides" }]
+files_present = ["src/charm.py", "pyproject.toml", "lib/charms/prometheus_k8s/v0/prometheus_scrape.py"]

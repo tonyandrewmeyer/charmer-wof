@@ -1,0 +1,7 @@
+# Dry-run and local results; the real store lives elsewhere (PLAN §5).
+scratch/
+.venv/
+
+# Committed here (the root .gitignore of the staging repo ignores it): the
+# package moves to its own repo, and dependabot reads it.
+!uv.lock

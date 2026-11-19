@@ -1,0 +1,311 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+new file mode 100644
+index 0000000..9fd2f8f
+--- /dev/null
++++ b/CLAUDE.md
+@@ -0,0 +1,14 @@
++# haproxy
++
++A machine charm for HAProxy, written with the `ops` library. The charm source
++is in `src/` (`charm.py` for the Juju side, `haproxy.py` for rendering the
++configuration and managing the service, `state/` for the validated charm
++state built from config and relations), the HAProxy configuration templates
++in `templates/`, unit tests (ops.testing / Scenario) in `tests/unit/`.
++Charm libraries live under `lib/`.
++
++## Commands
++
++- Unit tests: `tox -e unit` (or `PYTHONPATH=.:lib:src uv run --group unit pytest tests/unit`)
++- Lint: `tox -e lint`
++- Charm linter: `uvx charmlint .`
+diff --git a/charmcraft.yaml b/charmcraft.yaml
+index 3802aac..f71e55a 100644
+--- a/charmcraft.yaml
++++ b/charmcraft.yaml
+@@ -148,10 +148,6 @@ actions:
+         description: |
+           The name of the backend for which to get the endpoints.
+           If no backend with this name is present, an empty list is returned.
+-  get-configuration:
+-    description: |
+-      Return the rendered haproxy configuration currently on the haproxy unit.
+-      Client IP hash salts are redacted. Intended for debugging purposes.
+ 
+ charm-libs:
+ - lib: certificate_transfer_interface.certificate_transfer
+diff --git a/src/charm.py b/src/charm.py
+index 2acd620..65c5faf 100755
+--- a/src/charm.py
++++ b/src/charm.py
+@@ -50,7 +50,7 @@ from ops.model import SecretNotFoundError
+ 
+ from charms.dns_integrator.v0.dns_record import DNSRecordRequires
+ from dns_record import DNS_RECORD_RELATION, DNSRecordService
+-from haproxy import HAPROXY_CONFIG, HAProxyService, file_exists, read_file
++from haproxy import HAProxyService
+ from state.charm_state import CharmState, ProxyMode
+ from state.ddos_protection import DDosProtection
+ from state.exception import CharmStateValidationBaseError
+@@ -204,7 +204,6 @@ class HAProxyCharm(ops.CharmBase):
+         self.framework.observe(
+             self.on.get_proxied_endpoints_action, self._on_get_proxied_endpoints_action
+         )
+-        self.framework.observe(self.on.get_configuration_action, self._on_get_configuration_action)
+         # Hook peer relation events so non-leader units reconcile when the leader
+         # publishes certificate data to the peer relation app databag.
+         self.framework.observe(
+@@ -654,67 +653,6 @@ class HAProxyCharm(ops.CharmBase):
+ 
+         event.set_results({"endpoints": json.dumps(proxied_endpoints)})
+ 
+-    def _on_get_configuration_action(self, event: ActionEvent) -> None:
+-        """Return the on-disk haproxy configuration for debugging.
+-
+-        Reads the rendered configuration currently on disk
+-        (/etc/haproxy/haproxy.cfg) that haproxy is running. Does not write to
+-        disk or reload the service.
+-
+-        Args:
+-            event: Juju event
+-        """
+-        if not file_exists(HAPROXY_CONFIG):
+-            event.fail(f"HAProxy configuration file at {HAPROXY_CONFIG} not found. ")
+-            return
+-        configuration = read_file(HAPROXY_CONFIG)
+-
+-        try:
+-            configuration_is_default = self._configuration_is_default(configuration)
+-        except CharmStateValidationBaseError:
+-            event.log(
+-                "Could not determine whether this is the default configuration because the "
+-                "charm state is invalid."
+-            )
+-            configuration_is_default = False
+-        if configuration_is_default:
+-            event.log(
+-                "The HAProxy configuration matches the default configuration. This usually "
+-                "means no proxy backends are configured."
+-            )
+-
+-        event.set_results(
+-            {
+-                "configuration": _redact_log_hash_salt(configuration),
+-                "source": "disk",
+-            }
+-        )
+-
+-    def _configuration_is_default(self, configuration: str) -> bool:
+-        """Return whether the given configuration matches the default configuration.
+-
+-        Args:
+-            configuration: The configuration to compare against the default.
+-
+-        Raises:
+-            CharmStateValidationBaseError: When the charm state needed to render
+-                the default configuration cannot be built.
+-
+-        Returns:
+-            True if it is identical to the rendered default configuration.
+-        """
+-        default_configuration = self.haproxy_service.render_default_config(
+-            CharmState.from_charm(
+-                self,
+-                self._ingress_provider,
+-                self._ingress_per_unit_provider,
+-                self.haproxy_route_provider,
+-                self.haproxy_route_tcp_provider,
+-                self.haproxy_route_policy,
+-            )
+-        )
+-        return configuration == default_configuration
+-
+     def _publish_haproxy_route_proxied_endpoints(
+         self, haproxy_route_requirers_information: HaproxyRouteRequirersInformation
+     ) -> None:
+diff --git a/tests/integration/test_actions.py b/tests/integration/test_actions.py
+index 9965559..70229e2 100644
+--- a/tests/integration/test_actions.py
++++ b/tests/integration/test_actions.py
+@@ -19,7 +19,7 @@ def test_action(
+     juju: jubilant.Juju,
+ ):
+     """arrange: Deploy the charm integrated with any_charm haproxy-route.
+-    act: Trigger the charm's actions (get-proxied-endpoints and get-configuration).
++    act: Trigger the charm's get-proxied-endpoints action.
+     assert: Each action returns the expected result.
+     """
+     juju.integrate(
+@@ -88,14 +88,6 @@ def test_action(
+     )
+     assert task.results == {"endpoints": "[]"}, task.results
+ 
+-    # get-configuration returns exactly the configuration currently on disk.
+-    on_disk = juju.exec(
+-        "cat /etc/haproxy/haproxy.cfg", unit=f"{configured_application_with_tls}/0"
+-    ).stdout
+-    task = juju.run(f"{configured_application_with_tls}/0", "get-configuration")
+-    assert task.results["source"] == "disk", task.results
+-    assert task.results["configuration"].splitlines() == on_disk.splitlines(), task.results
+-
+     juju.remove_relation(
+         f"{configured_application_with_tls}:haproxy-route", any_charm_haproxy_route_requirer
+     )
+diff --git a/tests/unit/test_charm.py b/tests/unit/test_charm.py
+index b9e05db..6d9ab3e 100644
+--- a/tests/unit/test_charm.py
++++ b/tests/unit/test_charm.py
+@@ -14,7 +14,7 @@ import ops.testing
+ import pytest
+ 
+ import tls_relation
+-from charm import CharmStateValidationBaseError, HAProxyCharm
++from charm import HAProxyCharm
+ from tests.unit.conftest import (
+     TEST_EXTERNAL_HOSTNAME_CONFIG,
+     TEST_LOG_HASH_CLIENT_ADDRESS,
+@@ -684,145 +684,3 @@ def test_dns_update_uses_binding_ip(context_with_dns_mock, base_state, dns_recor
+ 
+     calls = update_dns_mock.call_args_list
+     assert any(call_args.args[1] == "10.0.0.5" for call_args in calls)
+-
+-
+-@pytest.mark.usefixtures("systemd_mock", "mocks_external_calls")
+-def test_get_configuration_returns_disk_config(monkeypatch: pytest.MonkeyPatch) -> None:
+-    """
+-    arrange: mock the config file on disk with known content.
+-    act: trigger the get-configuration action.
+-    assert: the on-disk file content is returned unchanged.
+-    """
+-    content = "global\n    maxconn 4096\n\nfrontend default\n    bind :80\n"
+-    monkeypatch.setattr("charm.file_exists", MagicMock(return_value=True))
+-    monkeypatch.setattr("charm.read_file", MagicMock(return_value=content))
+-    context = ops.testing.Context(HAProxyCharm)
+-    state = ops.testing.State(leader=True)
+-
+-    context.run(context.on.action("get-configuration"), state)
+-
+-    assert context.action_results == {"configuration": content, "source": "disk"}
+-
+-
+-@pytest.mark.usefixtures("systemd_mock", "mocks_external_calls")
+-def test_get_configuration_redacts_log_hash_salt(monkeypatch: pytest.MonkeyPatch) -> None:
+-    """
+-    arrange: mock on-disk formats containing a salt different from the current secret.
+-    act: trigger the get-configuration action.
+-    assert: every on-disk salt is redacted without changing the rest of the configuration.
+-    """
+-    content = "\n".join(
+-        [
+-            f'log-format "{TEST_LOG_HASH_CLIENT_ADDRESS} HTTP"',
+-            f'error-log-format "{TEST_LOG_HASH_CLIENT_ADDRESS} ERROR"',
+-            f'log-format "{TEST_LOG_HASH_CLIENT_ADDRESS} TCP"',
+-        ]
+-    )
+-    monkeypatch.setattr("charm.file_exists", MagicMock(return_value=True))
+-    monkeypatch.setattr("charm.read_file", MagicMock(return_value=content))
+-    context = ops.testing.Context(HAProxyCharm)
+-    log_hash_salt = ops.testing.Secret(tracked_content={"salt": "different-current-salt"})
+-    state = ops.testing.State(
+-        leader=True,
+-        config={"client-ip-hash-salt": log_hash_salt.id},
+-        secrets=[log_hash_salt],
+-    )
+-
+-    context.run(context.on.action("get-configuration"), state)
+-
+-    results = context.action_results
+-    assert results is not None
+-    configuration = results["configuration"]
+-    assert configuration == content.replace(TEST_LOG_HASH_SALT, "<redacted>")
+-    assert TEST_LOG_HASH_SALT not in configuration
+-    assert configuration.count("<redacted>") == 3
+-
+-
+-@pytest.mark.usefixtures("systemd_mock", "mocks_external_calls")
+-def test_get_configuration_missing_file_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+-    """
+-    arrange: mock the config file as absent from disk.
+-    act: trigger the get-configuration action.
+-    assert: the action fails with a clear message rather than returning empty.
+-    """
+-    monkeypatch.setattr("charm.file_exists", MagicMock(return_value=False))
+-    context = ops.testing.Context(HAProxyCharm)
+-    state = ops.testing.State(leader=True)
+-
+-    with pytest.raises(ops.testing.ActionFailed) as exc_info:
+-        context.run(context.on.action("get-configuration"), state)
+-
+-    assert "not found" in exc_info.value.message
+-
+-
+-@pytest.mark.usefixtures("systemd_mock", "mocks_external_calls")
+-@pytest.mark.parametrize(
+-    "on_disk_config, rendered_default, expect_default_warning",
+-    [
+-        pytest.param(
+-            "global\n    maxconn 4096\n",
+-            "global\n    maxconn 4096\n",
+-            True,
+-            id="matches-default",
+-        ),
+-        pytest.param(
+-            "frontend haproxy\n    bind :80\n",
+-            "global\n    maxconn 4096\n",
+-            False,
+-            id="differs-from-default",
+-        ),
+-    ],
+-)
+-def test_get_configuration_default_warning(
+-    monkeypatch: pytest.MonkeyPatch,
+-    on_disk_config: str,
+-    rendered_default: str,
+-    expect_default_warning: bool,
+-) -> None:
+-    """
+-    arrange: mock the on-disk config to either match or differ from the rendered default.
+-    act: trigger the get-configuration action.
+-    assert: the configuration is returned, and the "matches default" warning is logged
+-        only when the config is the default.
+-    """
+-    monkeypatch.setattr("charm.file_exists", MagicMock(return_value=True))
+-    monkeypatch.setattr("charm.read_file", MagicMock(return_value=on_disk_config))
+-    monkeypatch.setattr(
+-        "charm.HAProxyService.render_default_config",
+-        MagicMock(return_value=rendered_default),
+-    )
+-    context = ops.testing.Context(HAProxyCharm)
+-    state = ops.testing.State(leader=True)
+-
+-    context.run(context.on.action("get-configuration"), state)
+-
+-    assert context.action_results == {"configuration": on_disk_config, "source": "disk"}
+-    warned = any("default configuration" in log.lower() for log in context.action_logs)
+-    assert warned == expect_default_warning
+-
+-
+-@pytest.mark.usefixtures("systemd_mock", "mocks_external_calls")
+-def test_get_configuration_notes_invalid_charm_state(monkeypatch: pytest.MonkeyPatch) -> None:
+-    """
+-    arrange: the config file is present, but building the charm state raises.
+-    act: trigger the get-configuration action.
+-    assert: the configuration is still returned, and a "could not determine" note is
+-        logged instead of silently claiming it is not the default.
+-    """
+-    content = "frontend haproxy\n    bind :80\n"
+-    monkeypatch.setattr("charm.file_exists", MagicMock(return_value=True))
+-    monkeypatch.setattr("charm.read_file", MagicMock(return_value=content))
+-    monkeypatch.setattr(
+-        "charm.CharmState.from_charm",
+-        MagicMock(side_effect=CharmStateValidationBaseError("invalid config")),
+-    )
+-    context = ops.testing.Context(HAProxyCharm)
+-    state = ops.testing.State(leader=True)
+-
+-    context.run(context.on.action("get-configuration"), state)
+-
+-    results = context.action_results
+-    assert results is not None
+-    assert results == {"configuration": content, "source": "disk"}
+-    assert any("could not determine" in log.lower() for log in context.action_logs)
+-    assert not any("matches the default" in log.lower() for log in context.action_logs)

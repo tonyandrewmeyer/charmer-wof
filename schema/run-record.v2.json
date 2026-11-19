@@ -1,0 +1,965 @@
+{
+  "$defs": {
+    "Caps": {
+      "additionalProperties": false,
+      "properties": {
+        "max_cost_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Cost Usd"
+        },
+        "max_turns": {
+          "default": 150,
+          "title": "Max Turns",
+          "type": "integer"
+        },
+        "timeout_minutes": {
+          "default": 25,
+          "title": "Timeout Minutes",
+          "type": "integer"
+        }
+      },
+      "title": "Caps",
+      "type": "object"
+    },
+    "Cell": {
+      "additionalProperties": false,
+      "description": "One point in the matrix: task x harness x model x treatment x rep.",
+      "properties": {
+        "harness": {
+          "title": "Harness",
+          "type": "string"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "rep": {
+          "minimum": 0,
+          "title": "Rep",
+          "type": "integer"
+        },
+        "task": {
+          "title": "Task",
+          "type": "string"
+        },
+        "treatment": {
+          "title": "Treatment",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task",
+        "harness",
+        "model",
+        "treatment",
+        "rep"
+      ],
+      "title": "Cell",
+      "type": "object"
+    },
+    "HarnessRef": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "description": "As reported by the adapter at run time.",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "HarnessRef",
+      "type": "object"
+    },
+    "JudgeOutcome": {
+      "additionalProperties": false,
+      "properties": {
+        "details": {
+          "additionalProperties": true,
+          "description": "Free-form diagnostics; dropped from public held-out records.",
+          "title": "Details",
+          "type": "object"
+        },
+        "failure_tags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Failure Tags",
+          "type": "array"
+        },
+        "metrics": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Metrics",
+          "type": "object"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "fail",
+            "partial",
+            "error",
+            "not_run"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "verdicts": {
+          "items": {
+            "$ref": "#/$defs/JudgeVerdict"
+          },
+          "title": "Verdicts",
+          "type": "array"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "JudgeOutcome",
+      "type": "object"
+    },
+    "JudgeVerdict": {
+      "additionalProperties": false,
+      "properties": {
+        "cost_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Usd"
+        },
+        "failure_tags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Failure Tags",
+          "type": "array"
+        },
+        "max_total": {
+          "title": "Max Total",
+          "type": "integer"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notes"
+        },
+        "scores": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Scores",
+          "type": "object"
+        },
+        "total": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Total"
+        }
+      },
+      "required": [
+        "model",
+        "scores",
+        "total",
+        "max_total"
+      ],
+      "title": "JudgeVerdict",
+      "type": "object"
+    },
+    "ModelRef": {
+      "additionalProperties": false,
+      "properties": {
+        "dated": {
+          "title": "Dated",
+          "type": "boolean"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "openrouter_id": {
+          "title": "Openrouter Id",
+          "type": "string"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The OpenRouter provider that served the run; None if the run never started.",
+          "title": "Provider"
+        },
+        "reasoning_effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The reasoning effort the model was pinned to (models.toml); None means none was sent and the provider's default applied (but see HARNESS.md: omp always sends one).",
+          "title": "Reasoning Effort"
+        },
+        "tier": {
+          "enum": [
+            "frontier",
+            "mid",
+            "open-weight"
+          ],
+          "title": "Tier",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "openrouter_id",
+        "tier",
+        "dated"
+      ],
+      "title": "ModelRef",
+      "type": "object"
+    },
+    "OracleOutcome": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_tests_passed": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent Tests Passed"
+        },
+        "agent_tests_total": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent Tests Total"
+        },
+        "details": {
+          "additionalProperties": true,
+          "description": "Free-form diagnostics; dropped from public held-out records.",
+          "title": "Details",
+          "type": "object"
+        },
+        "failure_tags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Failure Tags",
+          "type": "array"
+        },
+        "key_tests": {
+          "additionalProperties": {
+            "enum": [
+              "pass",
+              "fail",
+              "skip",
+              "missing"
+            ],
+            "type": "string"
+          },
+          "title": "Key Tests",
+          "type": "object"
+        },
+        "metrics": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Metrics",
+          "type": "object"
+        },
+        "passed": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Passed"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "fail",
+            "partial",
+            "error",
+            "not_run"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "tests": {
+          "additionalProperties": {
+            "enum": [
+              "pass",
+              "fail",
+              "skip"
+            ],
+            "type": "string"
+          },
+          "title": "Tests",
+          "type": "object"
+        },
+        "total": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "OracleOutcome",
+      "type": "object"
+    },
+    "ProcessOutcome": {
+      "additionalProperties": false,
+      "properties": {
+        "cost_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cost Usd"
+        },
+        "details": {
+          "additionalProperties": true,
+          "description": "Free-form diagnostics; dropped from public held-out records.",
+          "title": "Details",
+          "type": "object"
+        },
+        "exit_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "completed",
+                "turn_cap",
+                "time_cap",
+                "cost_cap",
+                "error",
+                "not_started"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exit Reason"
+        },
+        "failure_tags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Failure Tags",
+          "type": "array"
+        },
+        "metrics": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Metrics",
+          "type": "object"
+        },
+        "ran_scripts": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Ran Scripts",
+          "type": "array"
+        },
+        "read_help": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "None when the treatment offered no help to read.",
+          "title": "Read Help"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "fail",
+            "partial",
+            "error",
+            "not_run"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "tool_calls": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Tool Calls",
+          "type": "object"
+        },
+        "tool_calls_total": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Calls Total"
+        },
+        "turns": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turns"
+        },
+        "wall_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Wall Seconds"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ProcessOutcome",
+      "type": "object"
+    },
+    "RunArtefacts": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_diff": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent Diff"
+        },
+        "diff_stats": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Diff Stats",
+          "type": "object"
+        },
+        "prompt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt"
+        }
+      },
+      "title": "RunArtefacts",
+      "type": "object"
+    },
+    "ScoringRef": {
+      "additionalProperties": false,
+      "properties": {
+        "judge_models": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Judge Models",
+          "type": "array"
+        },
+        "rubric_version": {
+          "title": "Rubric Version",
+          "type": "string"
+        },
+        "scoring_code_version": {
+          "title": "Scoring Code Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rubric_version",
+        "judge_models",
+        "scoring_code_version"
+      ],
+      "title": "ScoringRef",
+      "type": "object"
+    },
+    "TaskRef": {
+      "additionalProperties": false,
+      "properties": {
+        "gold_repo": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gold Repo"
+        },
+        "gold_sha": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gold Sha"
+        },
+        "gold_subdir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Schema version 2 on: the charm's directory in a monorepo gold (the workspace is `git archive <gold_sha>:<gold_subdir>`); None means the repo root. Not recorded in version 1 records: look the task up by (id, version).",
+          "title": "Gold Subdir"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "feature",
+            "new-charm"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "kind"
+      ],
+      "title": "TaskRef",
+      "type": "object"
+    },
+    "TierOutcome": {
+      "additionalProperties": false,
+      "description": "The common shape of every scoring tier's outcome.\n\n``status`` is ``not_run`` (with a ``reason``) when the tier didn't run:\nstubbed, not applicable, or skipped by budget. Tiers are diagnostics, not\ngates (PLAN \u00a74), so a failing tier never stops the next from running.",
+      "properties": {
+        "details": {
+          "additionalProperties": true,
+          "description": "Free-form diagnostics; dropped from public held-out records.",
+          "title": "Details",
+          "type": "object"
+        },
+        "failure_tags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Failure Tags",
+          "type": "array"
+        },
+        "metrics": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Metrics",
+          "type": "object"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "fail",
+            "partial",
+            "error",
+            "not_run"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "TierOutcome",
+      "type": "object"
+    },
+    "Tiers": {
+      "additionalProperties": false,
+      "properties": {
+        "judge": {
+          "$ref": "#/$defs/JudgeOutcome"
+        },
+        "live": {
+          "$ref": "#/$defs/TierOutcome"
+        },
+        "oracle": {
+          "$ref": "#/$defs/OracleOutcome"
+        },
+        "process": {
+          "$ref": "#/$defs/ProcessOutcome"
+        },
+        "static": {
+          "$ref": "#/$defs/TierOutcome"
+        }
+      },
+      "required": [
+        "static",
+        "oracle",
+        "live",
+        "judge",
+        "process"
+      ],
+      "title": "Tiers",
+      "type": "object"
+    },
+    "TreatmentRef": {
+      "additionalProperties": false,
+      "properties": {
+        "artefacts": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Every artefact the agent was given, name -> exact version, SHA or digest.",
+          "title": "Artefacts",
+          "type": "object"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "artefacts"
+      ],
+      "title": "TreatmentRef",
+      "type": "object"
+    }
+  },
+  "$id": "charmer_wof/run-record.v2.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "anchor": {
+      "title": "Anchor",
+      "type": "boolean"
+    },
+    "artefacts": {
+      "$ref": "#/$defs/RunArtefacts"
+    },
+    "caps": {
+      "$ref": "#/$defs/Caps"
+    },
+    "cell": {
+      "$ref": "#/$defs/Cell"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "dry_run": {
+      "default": false,
+      "title": "Dry Run",
+      "type": "boolean"
+    },
+    "harness": {
+      "$ref": "#/$defs/HarnessRef"
+    },
+    "held_out": {
+      "title": "Held Out",
+      "type": "boolean"
+    },
+    "model": {
+      "$ref": "#/$defs/ModelRef"
+    },
+    "redacted": {
+      "default": false,
+      "description": "True for the public form of a held-out run.",
+      "title": "Redacted",
+      "type": "boolean"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": 2,
+      "enum": [
+        1,
+        2
+      ],
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "scoring": {
+      "$ref": "#/$defs/ScoringRef"
+    },
+    "series": {
+      "description": "series_key(scoring); records only compare within a series.",
+      "title": "Series",
+      "type": "string"
+    },
+    "task": {
+      "$ref": "#/$defs/TaskRef"
+    },
+    "tiers": {
+      "$ref": "#/$defs/Tiers"
+    },
+    "treatment": {
+      "$ref": "#/$defs/TreatmentRef"
+    }
+  },
+  "required": [
+    "run_id",
+    "series",
+    "created_at",
+    "held_out",
+    "anchor",
+    "cell",
+    "task",
+    "treatment",
+    "harness",
+    "model",
+    "scoring",
+    "caps",
+    "tiers"
+  ],
+  "title": "RunRecord",
+  "type": "object"
+}

@@ -1,0 +1,35 @@
+# Models, all through OpenRouter (PLAN §3.2). One table per model; adding a
+# release is one new table. Keys are short, stable names used in cell ids.
+#
+#   openrouter_id  the id sent to OpenRouter. Use a dated id where the
+#                  provider publishes one (PLAN §1.1), and set dated = true.
+#   tier           frontier | mid | open-weight
+#   providers      optional OpenRouter provider routing (provider.order);
+#                  empty means OpenRouter chooses. Whichever provider served
+#                  the run is recorded per run either way.
+#   reasoning_effort  optional OpenRouter reasoning.effort: none | minimal |
+#                  low | medium | high | xhigh | max. Unset (the default, and
+#                  both models below) means the provider's default: the
+#                  adapters send an effort only when it's set (PLAN §8,
+#                  2026-11-14), except omp, which always sends one (HARNESS.md
+#                  "omp"). The value goes in the record's model.reasoning_effort.
+#
+# The two below are the hosted open-weight models from the §9 matrix
+# (research/2026-10-20-agents-writing-charms/harness/matrix-cloud.txt).
+
+[models.glm-5-3]
+# OpenRouter lists the model as z-ai/glm-5.3 with canonical_slug
+# z-ai/glm-5.3-20260816, routes every request for the undated id to it, and
+# accepts the dated slug as a request id (checked 2026-11-12).
+openrouter_id = "z-ai/glm-5.3-20260816"
+tier = "open-weight"
+dated = true
+providers = []
+
+[models.deepseek-v4-pro]
+# Already dated: canonical_slug deepseek/deepseek-v4-pro-20260813 (2026-11-12).
+# The undated deepseek/deepseek-v4-pro is a different, older release (-20260423).
+openrouter_id = "deepseek/deepseek-v4-pro-0813"
+tier = "open-weight"
+dated = true
+providers = []

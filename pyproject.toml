@@ -1,0 +1,41 @@
+[project]
+name = "charmer-wof"
+version = "0.1.0"
+description = "charmer-wof: a Warrant of Fitness for agents writing Juju charms, run on a schedule"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "pydantic>=2.7",
+    "pyyaml>=6",
+]
+
+[project.scripts]
+wof = "charmer_wof.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "jsonschema>=4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/charmer_wof"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+
+[tool.ruff]
+line-length = 99
+target-version = "py311"
+# Task and treatment assets are charm code: they are linted under the gold
+# charm's own configuration when a run is scored, not under this package's.
+extend-exclude = ["tasks", "treatments", "scratch"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF"]

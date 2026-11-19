@@ -1,0 +1,84 @@
+# Treatments (PLAN §3.3): what the agent is given on top of the task.
+#
+# Each treatment records the exact version of every artefact it gives the
+# agent. Overlay directories are content-hashed at load time and recorded as
+# the `overlay` artefact automatically; anything fetched from elsewhere (a
+# skill repo, the docs, an init profile, charmlint) is pinned here under
+# `artefacts`. `common_artefacts` apply to every treatment.
+#
+#   applies_to       task ids this treatment has content for ("*" = any)
+#   overlay          dir holding one subdir per task id, copied over the base
+#   context_append   text appended to the task's context file
+#   prompt_append    text appended to the prompt
+#   from_oracle      visible files generated from every file of the task's
+#                    oracle (tests-target); prompt_append's {generated} names them
+#   help_markers     substrings that mean "the agent read the help" when they
+#                    appear in a file read / shell command / skill call
+#   script_markers   substrings that mean "the agent ran a bundled script"
+
+# The task context file tells the agent to run `uvx charmlint .`, so every
+# treatment gives the agent charmlint. §9 left it unpinned.
+[common_artefacts]
+charmlint = "0.3.0"
+
+[treatments.none]
+version = "1"
+description = "Baseline: the task alone."
+applies_to = ["*"]
+
+[treatments.howto]
+version = "1"
+description = "The procedure as a how-to in docs/how-to/, plus a one-line pointer in the context file."
+applies_to = ["hedgedoc-ingress"]
+overlay = "treatments/howto"
+context_append = "\nHow-to guides for common changes are in docs/how-to/.\n"
+# Only the treatment's own file: the gold charm's docs/how-to/ already holds
+# ten guides (one on ingress and TLS), so §9's broader "docs/how-to" marker
+# would count reading any of them as reading the help.
+help_markers = ["docs/how-to/add-ingress.md"]
+
+[treatments.skill]
+version = "1"
+description = "The same content as the how-to, as a task-scoped skill (prose only)."
+applies_to = ["hedgedoc-ingress"]
+overlay = "treatments/skill"
+help_markers = ["add-ingress/SKILL.md", "skills/add-ingress", "skill://add-ingress", '"id": "add-ingress"']
+
+[treatments.skill-scripts]
+version = "1"
+description = "The skill plus two scripts: one does the mechanical lib/endpoint edit, one checks the result with Scenario."
+applies_to = ["hedgedoc-ingress"]
+overlay = "treatments/skill-scripts"
+help_markers = ["add-ingress/SKILL.md", "skills/add-ingress", "skill://add-ingress", '"id": "add-ingress"']
+script_markers = ["add_ingress_endpoint.py", "check_ingress.py"]
+
+[treatments.tests-target]
+# v2 (2026-11-17, PLAN §8): every oracle file is shown, not one chosen file.
+# v1 showed only hedgedoc-ingress's exemplar file, which has no strip-prefix test.
+version = "2"
+description = "No prose; every file of the task's oracle as visible acceptance tests the agent must make pass without editing (plus, for hedgedoc-ingress, a .feature file)."
+# Every feature task (each has an oracle to generate from); not the new-charm
+# briefs, whose oracles check the brief generically.
+applies_to = [
+    "hedgedoc-ingress",
+    "alertmanager-workload-tracing",
+    "haproxy-client-ip-hash-salt",
+    "haproxy-get-configuration",
+    "hedgedoc-s3",
+]
+overlay = "treatments/tests-target"
+prompt_append = "\nAcceptance tests describing the required behaviour are in {generated}; make them pass without modifying them."
+
+[treatments.tests-target.from_oracle]
+# Every file in the task's oracle.files goes to the oracle's install_dir, with
+# test__oracle_ renamed to test_acceptance_ in the file name.
+applies_to = ["*"]
+rename = ["test__oracle_", "test_acceptance_"]
+# De-oracle the names, as §9's run.sh did with sed.
+replace = [["test_oracle_", "test_"]]
+
+[treatments.tests-target.from_oracle.task_replace]
+hedgedoc-ingress = [
+    ["Hidden acceptance tests for ingress support (the scoring oracle)", "Acceptance tests for ingress support"],
+    ["The exemplar's own ingress tests, used as the T2 oracle", "Acceptance tests for ingress support"],
+]

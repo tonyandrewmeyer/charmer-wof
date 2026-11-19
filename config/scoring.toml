@@ -1,0 +1,17 @@
+# Scoring configuration. rubric_version and judge_models feed the `series`
+# key together with the scoring-code version (charmer_wof.scoring.SCORING_CODE_VERSION):
+# changing any of them starts a new series (PLAN §1.1).
+
+rubric_version = "1"
+
+# Pinned judge models (OpenRouter ids). §9 used a single Anthropic Sonnet
+# judge via Claude Code; PLAN §4 wants more than one. Confirm exact ids
+# against https://openrouter.ai/api/v1/models before phase 4 (judge tier).
+judge_models = [
+    "anthropic/claude-sonnet-5.5",
+]
+
+[static]
+# charmlint version the static tier scores with (run via `uvx`). Bumping it
+# changes charmlint deltas, so it is part of the scoring-code version.
+charmlint = "0.3.0"

@@ -1,0 +1,441 @@
+diff -ruN -x .venv -x .tox -x .git -x __pycache__ -x .ruff_cache -x .pytest_cache -x lib -x uv.lock -x .mypy_cache -x terraform -x .terraform reference-t2/charmcraft.yaml base-t2/charmcraft.yaml
+--- reference-t2/charmcraft.yaml	2026-09-21 05:45:29.618884720 -0500
++++ base-t2/charmcraft.yaml	2026-10-20 15:20:54.610422643 -0500
+@@ -18,10 +18,6 @@
+   * Backed by PostgreSQL or MySQL (related charms), with an embedded SQLite
+     fallback for quick, small, development deployments.
+   * Automatic, secure session-secret management using Juju secrets.
+-  * Ingress with the public URL, protocol and sub-path wired through to
+-    HedgeDoc automatically -- the settings that otherwise break the editor in
+-    ways that do not obviously point at a URL. TLS is terminated at the
+-    ingress.
+   * Optional S3-compatible object storage for uploaded images, so uploads
+     survive container restarts and rescheduling.
+   * Single sign-on that configures itself from an `oauth` integration with an
+@@ -96,10 +92,6 @@
+     interface: mysql_client
+     optional: true
+     limit: 1
+-  ingress:
+-    interface: ingress
+-    optional: true
+-    limit: 1
+   s3:
+     interface: s3
+     optional: true
+@@ -152,18 +144,13 @@
+       default: ""
+       description: >
+         The hostname HedgeDoc is served on, used for generated URLs and
+-        cookies (CMD_DOMAIN). Set this only when there is no ingress
+-        integration: an ingress always takes precedence, and this option is
+-        ignored while one is present. TLS is terminated at the ingress: relate
+-        your ingress (e.g. Traefik) to a certificates provider to serve
+-        HedgeDoc over HTTPS.
++        cookies (CMD_DOMAIN). Leave empty to use the in-cluster address.
+     external-tls:
+       type: boolean
+       default: false
+       description: >
+         Whether HedgeDoc is reached over HTTPS when external-hostname is set
+-        (CMD_PROTOCOL_USESSL). Only consulted when not using ingress; with an
+-        ingress relation the scheme is taken from the ingress URL. Enable this
++        (CMD_PROTOCOL_USESSL). Enable this
+         when external-hostname is fronted by TLS terminated elsewhere, so that
+         HedgeDoc generates https:// URLs and marks session cookies as Secure.
+ 
+@@ -264,8 +251,7 @@
+         Serve the /status and /metrics endpoints (CMD_ENABLE_STATS_API).
+         Required by the metrics-endpoint integration: with this disabled both
+         endpoints return 403 and Prometheus scrapes fail. Note that HedgeDoc
+-        serves them on the same port as the application, so they are reachable
+-        through the ingress as well as from Prometheus.
++        serves them on the same port as the application.
+ 
+     # --- Local accounts ---
+     enable-email-login:
+@@ -441,8 +427,6 @@
+     version: "0"
+   - lib: data_platform_libs.s3
+     version: "0"
+-  - lib: traefik_k8s.ingress
+-    version: "2"
+   - lib: prometheus_k8s.prometheus_scrape
+     version: "0"
+   - lib: loki_k8s.loki_push_api
+diff -ruN -x .venv -x .tox -x .git -x __pycache__ -x .ruff_cache -x .pytest_cache -x lib -x uv.lock -x .mypy_cache -x terraform -x .terraform reference-t2/CLAUDE.md base-t2/CLAUDE.md
+--- reference-t2/CLAUDE.md	1969-12-31 18:00:00.000000000 -0600
++++ base-t2/CLAUDE.md	2026-10-20 15:25:00.958626401 -0500
+@@ -0,0 +1,26 @@
++# hedgedoc-k8s
++
++A Kubernetes charm for HedgeDoc, written with the `ops` library. The charm
++source is in `src/` (`charm.py` for the Juju side, `hedgedoc.py` for the
++workload-facing `CMD_*` mapping, free of `ops`), unit tests (ops.testing /
++Scenario) in `tests/unit/`, integration tests (jubilant) in
++`tests/integration/`, and docs in `docs/`. Charm libraries fetched with
++`charmcraft fetch-lib` live under `lib/` and are listed under `charm-libs:` in
++`charmcraft.yaml`.
++
++## Commands
++
++- Unit tests: `tox -e unit` (or `uv run pytest tests/unit`)
++- Lint: `tox -e lint` (ruff check, ruff format --check, codespell)
++- Static checks: `tox -e static`
++- Charm linter: `uvx charmlint .`
++
++## Conventions
++
++- Keep the reconciler pattern: events funnel into `_reconcile`, and unit
++  status is set only in `_on_collect_status`.
++- Keep workload-facing logic in `src/hedgedoc.py`, free of `ops` imports.
++- Tests go through `ops.testing.State`, the Pebble plan and relation
++  databags; do not reach into private attributes of the charm.
++- `docs/reference/configuration.md` must match the option descriptions in
++  `charmcraft.yaml` (a unit test checks this).
+Binary files reference-t2/.coverage and base-t2/.coverage differ
+diff -ruN -x .venv -x .tox -x .git -x __pycache__ -x .ruff_cache -x .pytest_cache -x lib -x uv.lock -x .mypy_cache -x terraform -x .terraform reference-t2/docs/reference/configuration.md base-t2/docs/reference/configuration.md
+--- reference-t2/docs/reference/configuration.md	2026-09-21 05:46:01.752851280 -0500
++++ base-t2/docs/reference/configuration.md	2026-10-20 15:22:10.771034582 -0500
+@@ -15,8 +15,8 @@
+ 
+ | Option | Type | Default | Description |
+ |---|---|---|---|
+-| `external-hostname` | `string` | `""` | The hostname HedgeDoc is served on, used for generated URLs and cookies (CMD_DOMAIN). Set this only when there is no ingress integration: an ingress always takes precedence, and this option is ignored while one is present. TLS is terminated at the ingress: relate your ingress (e.g. Traefik) to a certificates provider to serve HedgeDoc over HTTPS. |
+-| `external-tls` | `boolean` | `false` | Whether HedgeDoc is reached over HTTPS when external-hostname is set (CMD_PROTOCOL_USESSL). Only consulted when not using ingress; with an ingress relation the scheme is taken from the ingress URL. Enable this when external-hostname is fronted by TLS terminated elsewhere, so that HedgeDoc generates https:// URLs and marks session cookies as Secure. |
++| `external-hostname` | `string` | `""` | The hostname HedgeDoc is served on, used for generated URLs and cookies (CMD_DOMAIN). Leave empty to use the in-cluster address. |
++| `external-tls` | `boolean` | `false` | Whether HedgeDoc is reached over HTTPS when external-hostname is set (CMD_PROTOCOL_USESSL). Enable this when external-hostname is fronted by TLS terminated elsewhere, so that HedgeDoc generates https:// URLs and marks session cookies as Secure. |
+ 
+ ## Logging
+ 
+@@ -79,7 +79,7 @@
+ 
+ | Option | Type | Default | Description |
+ |---|---|---|---|
+-| `enable-stats-api` | `boolean` | `true` | Serve the /status and /metrics endpoints (CMD_ENABLE_STATS_API). Required by the metrics-endpoint integration: with this disabled both endpoints return 403 and Prometheus scrapes fail. Note that HedgeDoc serves them on the same port as the application, so they are reachable through the ingress as well as from Prometheus. |
++| `enable-stats-api` | `boolean` | `true` | Serve the /status and /metrics endpoints (CMD_ENABLE_STATS_API). Required by the metrics-endpoint integration: with this disabled both endpoints return 403 and Prometheus scrapes fail. Note that HedgeDoc serves them on the same port as the application. |
+ 
+ ## Authentication: generic OAuth2 / OIDC
+ 
+diff -ruN -x .venv -x .tox -x .git -x __pycache__ -x .ruff_cache -x .pytest_cache -x lib -x uv.lock -x .mypy_cache -x terraform -x .terraform reference-t2/src/charm.py base-t2/src/charm.py
+--- reference-t2/src/charm.py	2026-09-21 05:45:22.103686926 -0500
++++ base-t2/src/charm.py	2026-10-20 15:20:20.305093882 -0500
+@@ -26,7 +26,6 @@
+ from charms.grafana_k8s.v0.grafana_dashboard import GrafanaDashboardProvider
+ from charms.loki_k8s.v1.loki_push_api import LogForwarder
+ from charms.prometheus_k8s.v0.prometheus_scrape import MetricsEndpointProvider
+-from charms.traefik_k8s.v2.ingress import IngressPerAppRequirer
+ 
+ import hedgedoc
+ 
+@@ -75,12 +74,6 @@
+         self.database = DatabaseRequires(self, "database", database_name=DATABASE_NAME)
+         self.mysql = DatabaseRequires(self, "mysql", database_name=DATABASE_NAME)
+         self.s3 = S3Requirer(self, "s3", bucket_name="hedgedoc")
+-        self.ingress = IngressPerAppRequirer(
+-            self,
+-            relation_name="ingress",
+-            port=hedgedoc.HEDGEDOC_PORT,
+-            strip_prefix=True,
+-        )
+         # Single sign-on from an identity provider (e.g. the Canonical Identity
+         # Platform). HedgeDoc's generic OAuth2 provider speaks plain OIDC, so
+         # the relation supplies everything the oauth2-* config options would.
+@@ -140,8 +133,6 @@
+             self.on["mysql"].relation_created,
+             self.s3.on.credentials_changed,
+             self.s3.on.credentials_gone,
+-            self.ingress.on.ready,
+-            self.ingress.on.revoked,
+             self.oauth.on.oauth_info_changed,
+             self.oauth.on.oauth_info_removed,
+         ):
+@@ -249,15 +240,14 @@
+         )
+ 
+         # The catalogue entry and the OAuth client both embed the external URL,
+-        # which changes when ingress arrives, departs or is reconfigured.
++        # which changes when it is reconfigured.
+         self.catalogue.update_item(self._catalogue_item())
+         client_config = self._oauth_client_config()
+         if client_config is not None and self.model.get_relation("oauth"):
+             self.oauth.update_client_config(client_config)
+ 
+-        # Declare the port Juju should publish for the application. Ingress
+-        # routes to the pod directly, so this is not needed for that, but it
+-        # makes the port visible in `juju status` and `juju expose` work.
++        # Declare the port Juju should publish for the application, so that it
++        # is visible in `juju status` and `juju expose` works.
+         self.unit.set_ports(hedgedoc.HEDGEDOC_PORT)
+ 
+         try:
+@@ -446,9 +436,7 @@
+         return builder(username, password, endpoints, DATABASE_NAME)
+ 
+     def _external_url(self) -> hedgedoc.ExternalUrl | None:
+-        """Determine the externally-visible URL from ingress or config."""
+-        if self.ingress.url:
+-            return hedgedoc.ExternalUrl.from_url(self.ingress.url)
++        """Determine the externally-visible URL from configuration."""
+         hostname = cast(str, self.config["external-hostname"])
+         if hostname:
+             return hedgedoc.ExternalUrl(domain=hostname, use_ssl=bool(self.config["external-tls"]))
+@@ -466,7 +454,7 @@
+         kills the workload, losing every unsaved note revision with it.
+ 
+         Juju publishes a stable ClusterIP service named after the application,
+-        so fall back to that when neither ingress nor external-hostname says
++        so fall back to that when external-hostname does not say
+         what the outside world calls this unit. The port has to travel in the
+         domain, as it does everywhere else here -- see build_environment.
+         """
+@@ -565,7 +553,7 @@
+         """Describe this application to an identity provider.
+ 
+         The redirect URI has to be the externally-visible one, so this is only
+-        possible once ingress (or external-hostname) tells us what that is.
++        possible once external-hostname tells us what that is.
+         """
+         external_url = self._external_url()
+         if external_url is None or not external_url.domain:
+diff -ruN -x .venv -x .tox -x .git -x __pycache__ -x .ruff_cache -x .pytest_cache -x lib -x uv.lock -x .mypy_cache -x terraform -x .terraform reference-t2/tests/integration/test_integrations.py base-t2/tests/integration/test_integrations.py
+--- reference-t2/tests/integration/test_integrations.py	2026-09-21 06:08:37.579674064 -0500
++++ base-t2/tests/integration/test_integrations.py	1969-12-31 18:00:00.000000000 -0600
+@@ -1,136 +0,0 @@
+-# Copyright 2026 Tony Meyer
+-# See LICENSE file for licensing details.
+-
+-"""Integration tests for ingress and the service catalogue.
+-
+-These need their own topology (Traefik assigns the external URL that HedgeDoc,
+-the catalogue entry and the OAuth redirect URI are all derived from), so they
+-run in a separate model from the core tests.
+-"""
+-
+-from __future__ import annotations
+-
+-import json
+-import pathlib
+-
+-import jubilant
+-import pytest
+-from conftest import APP_NAME, RESOURCES
+-from helpers import fetch, pebble, wait_for_url
+-
+-UNIT = f"{APP_NAME}/0"
+-TRAEFIK = "traefik"
+-CATALOGUE = "catalogue"
+-
+-
+-@pytest.mark.juju_setup
+-def test_deploy_with_ingress_and_catalogue(juju: jubilant.Juju, charm: pathlib.Path):
+-    juju.deploy(charm, app=APP_NAME, resources=RESOURCES)
+-    juju.deploy("traefik-k8s", app=TRAEFIK, channel="latest/stable", trust=True)
+-    juju.deploy("catalogue-k8s", app=CATALOGUE, channel="3.0/stable", trust=True)
+-    juju.integrate(f"{APP_NAME}:ingress", f"{TRAEFIK}:ingress")
+-    # The catalogue charm's own endpoint is `catalogue-item`.
+-    juju.integrate(f"{APP_NAME}:catalogue", f"{CATALOGUE}:catalogue-item")
+-    juju.wait(
+-        lambda status: jubilant.all_active(status, APP_NAME, TRAEFIK, CATALOGUE),
+-        timeout=20 * 60,
+-    )
+-
+-
+-def _external_url(juju: jubilant.Juju) -> str:
+-    data = json.loads(juju.cli("show-unit", UNIT, "--format", "json"))
+-    for relation in data[UNIT]["relation-info"]:
+-        if relation["endpoint"] == "ingress":
+-            return json.loads(relation["application-data"]["ingress"])["url"]
+-    raise AssertionError("no ingress relation data")
+-
+-
+-def test_ingress_url_is_wired_into_hedgedoc(juju: jubilant.Juju):
+-    """Getting these wrong is the classic HedgeDoc misconfiguration.
+-
+-    They drive every generated asset and callback URL, and the symptoms are a
+-    visually broken editor and stuck image uploads.
+-    """
+-    url = _external_url(juju)
+-    plan = pebble(juju, UNIT, "plan")
+-    host, _, path = url.split("//", 1)[1].partition("/")
+-
+-    assert f"CMD_DOMAIN: {host}" in plan
+-    # HedgeDoc joins CMD_URL_PATH to the origin with a slash of its own, so the
+-    # value must be the bare sub-path.
+-    assert f"CMD_URL_PATH: {path}" in plan
+-    assert "CMD_URL_PATH: /" not in plan
+-    assert 'CMD_PROTOCOL_USESSL: "false"' in plan or "CMD_PROTOCOL_USESSL: 'false'" in plan
+-
+-
+-def test_hedgedoc_is_reachable_through_the_ingress(juju: jubilant.Juju):
+-    url = _external_url(juju)
+-    wait_for_url(f"{url}/_health")
+-
+-    with fetch(f"{url}/_health") as response:
+-        assert response.status == 200
+-        assert json.load(response)["ready"] is True
+-    with fetch(f"{url}/") as response:
+-        assert response.status == 200
+-
+-
+-def test_a_note_created_through_the_ingress_is_reachable(juju: jubilant.Juju):
+-    """Regression test for the sub-path HedgeDoc is served under.
+-
+-    HedgeDoc builds its public URL as origin + "/" + CMD_URL_PATH, so passing
+-    the ingress path with its leading slash produced "http://host//sub/...".
+-    Everything still looked fine until a note was created: the redirect went
+-    to a doubled-slash URL that the proxy answered with 404.
+-    """
+-    url = _external_url(juju)
+-    wait_for_url(f"{url}/_health")
+-
+-    with fetch(f"{url}/new", method="POST") as response:
+-        assert response.status in (301, 302), response.status
+-        location = response.headers["Location"]
+-
+-    assert "//" not in location.split("://", 1)[1], f"doubled slash in {location}"
+-    assert location.startswith(f"{url}/")
+-
+-    # And the note that was created is actually served at that address.
+-    with fetch(location) as response:
+-        assert response.status == 200
+-        assert b"<!DOCTYPE html>" in response.read(2048)
+-
+-
+-def test_catalogue_entry_carries_the_external_url(juju: jubilant.Juju):
+-    url = _external_url(juju)
+-    data = json.loads(juju.cli("show-unit", UNIT, "--format", "json"))
+-    for relation in data[UNIT]["relation-info"]:
+-        if relation["endpoint"] == "catalogue":
+-            item = relation["local-unit"].get("application-data") or relation.get(
+-                "local-application-data", {}
+-            )
+-            break
+-    else:
+-        raise AssertionError("no catalogue relation")
+-    # Fall back to reading the databag through the catalogue charm if Juju did
+-    # not include the local application data in show-unit.
+-    if not item:
+-        item = json.loads(juju.cli("show-unit", f"{CATALOGUE}/0", "--format", "json"))
+-        item = next(
+-            r["application-data"]
+-            for r in item[f"{CATALOGUE}/0"]["relation-info"]
+-            if r["endpoint"] == "catalogue-item"
+-        )
+-    assert item["name"] == "HedgeDoc"
+-    assert item["url"] == url
+-
+-
+-def test_removing_ingress_falls_back_to_the_cluster_address(juju: jubilant.Juju):
+-    """The ingress URL goes away, but HedgeDoc is never left without a domain.
+-
+-    With no domain at all, HedgeDoc's filesystem uploader builds a relative
+-    base URL, throws, and takes the process down with it, so the charm falls
+-    back to the ClusterIP service Juju publishes for the application.
+-    """
+-    juju.cli("remove-relation", f"{APP_NAME}:ingress", f"{TRAEFIK}:ingress")
+-    juju.wait(lambda status: jubilant.all_active(status, APP_NAME), timeout=10 * 60)
+-    plan = pebble(juju, UNIT, "plan")
+-    assert f"CMD_DOMAIN: {APP_NAME}.{juju.model}.svc.cluster.local:3000" in plan
+-    assert "CMD_URL_PATH" not in plan
+diff -ruN -x .venv -x .tox -x .git -x __pycache__ -x .ruff_cache -x .pytest_cache -x lib -x uv.lock -x .mypy_cache -x terraform -x .terraform reference-t2/tests/unit/test_charm.py base-t2/tests/unit/test_charm.py
+--- reference-t2/tests/unit/test_charm.py	2026-09-21 05:45:42.819761287 -0500
++++ base-t2/tests/unit/test_charm.py	2026-10-20 15:22:13.534790598 -0500
+@@ -312,20 +312,6 @@
+     assert env["CMD_PROTOCOL_USESSL"] == "true"
+ 
+ 
+-def test_ingress_url_sets_domain_protocol_and_path(ctx, container, peer):
+-    ingress = testing.Relation(
+-        "ingress",
+-        interface="ingress",
+-        remote_app_data={"ingress": json.dumps({"url": "https://pad.example.com/hedgedoc-k8s"})},
+-    )
+-    state = testing.State(leader=True, containers={container}, relations={peer, ingress})
+-    out = ctx.run(ctx.on.config_changed(), state)
+-    env = _hedgedoc_layer(out)
+-    assert env["CMD_DOMAIN"] == "pad.example.com"
+-    assert env["CMD_PROTOCOL_USESSL"] == "true"
+-    assert env["CMD_URL_PATH"] == "hedgedoc-k8s"
+-
+-
+ def test_s3_relation_sets_upload_environment(ctx, container, peer):
+     s3 = testing.Relation(
+         "s3",
+@@ -587,22 +573,6 @@
+ # -- Catalogue --------------------------------------------------------------
+ 
+ 
+-def test_catalogue_item_carries_the_ingress_url(ctx, container, peer):
+-    ingress = testing.Relation(
+-        "ingress",
+-        interface="ingress",
+-        remote_app_data={"ingress": json.dumps({"url": "https://pad.example.com/hedgedoc"})},
+-    )
+-    catalogue = testing.Relation("catalogue", interface="catalogue")
+-    state = testing.State(
+-        leader=True, containers={container}, relations={peer, ingress, catalogue}
+-    )
+-    out = ctx.run(ctx.on.config_changed(), state)
+-    item = out.get_relation(catalogue.id).local_app_data
+-    assert item["name"] == "HedgeDoc"
+-    assert item["url"] == "https://pad.example.com/hedgedoc"
+-
+-
+ def test_catalogue_item_url_is_empty_without_an_external_url(ctx, container, peer):
+     catalogue = testing.Relation("catalogue", interface="catalogue")
+     state = testing.State(leader=True, containers={container}, relations={peer, catalogue})
+@@ -651,25 +621,6 @@
+     assert env["CMD_OAUTH2_USER_PROFILE_ID_ATTR"] == "sub"
+ 
+ 
+-def test_oauth_redirect_uri_is_registered_from_the_ingress_url(ctx, container, peer):
+-    client_secret = testing.Secret({"secret": "s3cr3t"})
+-    oauth = _oauth_relation(client_secret.id)
+-    ingress = testing.Relation(
+-        "ingress",
+-        interface="ingress",
+-        remote_app_data={"ingress": json.dumps({"url": "https://pad.example.com/hedgedoc"})},
+-    )
+-    state = testing.State(
+-        leader=True,
+-        containers={container},
+-        relations={peer, oauth, ingress},
+-        secrets={client_secret},
+-    )
+-    out = ctx.run(ctx.on.config_changed(), state)
+-    published = out.get_relation(oauth.id).local_app_data
+-    assert published["redirect_uri"] == ("https://pad.example.com/hedgedoc/auth/oauth2/callback")
+-
+-
+ def test_waiting_while_the_identity_provider_has_not_answered(ctx, container, peer):
+     oauth = testing.Relation("oauth", interface="oauth")
+     state = testing.State(leader=True, containers={container}, relations={peer, oauth})
+@@ -703,7 +654,7 @@
+     Its filesystem uploader does `new URL(name, serverURL + "/uploads/")`. With
+     no domain, serverURL is "", the base is a bare "/uploads/", and the throw is
+     uncaught -- HedgeDoc exits. Uploads default to "filesystem", so a stock
+-    deployment with neither ingress nor external-hostname would be killed by the
++    deployment with no external-hostname would be killed by the
+     first pasted image.
+     """
+     out = ctx.run(
+@@ -717,18 +668,6 @@
+     assert parsed.scheme and parsed.netloc
+ 
+ 
+-def test_ingress_takes_precedence_over_the_cluster_fallback(ctx, container, peer):
+-    ingress = testing.Relation(
+-        "ingress",
+-        remote_app_data={"ingress": json.dumps({"url": "https://pad.example.com/hedgedoc"})},
+-    )
+-    out = ctx.run(
+-        ctx.on.config_changed(),
+-        testing.State(leader=True, containers={container}, relations={peer, ingress}),
+-    )
+-    assert _hedgedoc_layer(out)["CMD_DOMAIN"] == "pad.example.com"
+-
+-
+ # -- Configuration ----------------------------------------------------------
+ 
+ 

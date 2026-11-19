@@ -1,0 +1,304 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+new file mode 100644
+index 0000000..10ec8e2
+--- /dev/null
++++ b/CLAUDE.md
+@@ -0,0 +1,26 @@
++# hedgedoc-k8s
++
++A Kubernetes charm for HedgeDoc, written with the `ops` library. The charm
++source is in `src/` (`charm.py` for the Juju side, `hedgedoc.py` for the
++workload-facing `CMD_*` mapping, free of `ops`), unit tests (ops.testing /
++Scenario) in `tests/unit/`, integration tests (jubilant) in
++`tests/integration/`, and docs in `docs/`. Charm libraries fetched with
++`charmcraft fetch-lib` live under `lib/` and are listed under `charm-libs:` in
++`charmcraft.yaml`.
++
++## Commands
++
++- Unit tests: `tox -e unit` (or `uv run pytest tests/unit`)
++- Lint: `tox -e lint` (ruff check, ruff format --check, codespell)
++- Static checks: `tox -e static`
++- Charm linter: `uvx charmlint .`
++
++## Conventions
++
++- Keep the reconciler pattern: events funnel into `_reconcile`, and unit
++  status is set only in `_on_collect_status`.
++- Keep workload-facing logic in `src/hedgedoc.py`, free of `ops` imports.
++- Tests go through `ops.testing.State`, the Pebble plan and relation
++  databags; do not reach into private attributes of the charm.
++- `docs/reference/configuration.md` must match the option descriptions in
++  `charmcraft.yaml` (a unit test checks this).
+diff --git a/charmcraft.yaml b/charmcraft.yaml
+index 3ad1ba7..8e7b771 100644
+--- a/charmcraft.yaml
++++ b/charmcraft.yaml
+@@ -22,8 +22,6 @@ description: |
+     HedgeDoc automatically -- the settings that otherwise break the editor in
+     ways that do not obviously point at a URL. TLS is terminated at the
+     ingress.
+-  * Optional S3-compatible object storage for uploaded images, so uploads
+-    survive container restarts and rescheduling.
+   * Single sign-on that configures itself from an `oauth` integration with an
+     identity provider, or by hand against any OIDC/OAuth2 provider or GitHub,
+     with the credentials held in a Juju secret.
+@@ -100,10 +98,6 @@ requires:
+     interface: ingress
+     optional: true
+     limit: 1
+-  s3:
+-    interface: s3
+-    optional: true
+-    limit: 1
+   logging:
+     interface: loki_push_api
+     optional: true
+@@ -439,8 +433,6 @@ charm-libs:
+     version: "1"
+   - lib: data_platform_libs.data_interfaces
+     version: "0"
+-  - lib: data_platform_libs.s3
+-    version: "0"
+   - lib: traefik_k8s.ingress
+     version: "2"
+   - lib: prometheus_k8s.prometheus_scrape
+diff --git a/src/charm.py b/src/charm.py
+index 05503c9..7bcd9b4 100644
+--- a/src/charm.py
++++ b/src/charm.py
+@@ -22,7 +22,6 @@ import ops_tracing
+ from charmlibs.interfaces import oauth as oauth_interface
+ from charms.catalogue_k8s.v1.catalogue import CatalogueConsumer, CatalogueItem
+ from charms.data_platform_libs.v0.data_interfaces import DatabaseRequires
+-from charms.data_platform_libs.v0.s3 import S3Requirer
+ from charms.grafana_k8s.v0.grafana_dashboard import GrafanaDashboardProvider
+ from charms.loki_k8s.v1.loki_push_api import LogForwarder
+ from charms.prometheus_k8s.v0.prometheus_scrape import MetricsEndpointProvider
+@@ -74,7 +73,6 @@ class HedgeDocCharm(ops.CharmBase):
+         # Integrations.
+         self.database = DatabaseRequires(self, "database", database_name=DATABASE_NAME)
+         self.mysql = DatabaseRequires(self, "mysql", database_name=DATABASE_NAME)
+-        self.s3 = S3Requirer(self, "s3", bucket_name="hedgedoc")
+         self.ingress = IngressPerAppRequirer(
+             self,
+             relation_name="ingress",
+@@ -138,8 +136,6 @@ class HedgeDocCharm(ops.CharmBase):
+             # not noticed until some unrelated event happens to fire.
+             self.on["database"].relation_created,
+             self.on["mysql"].relation_created,
+-            self.s3.on.credentials_changed,
+-            self.s3.on.credentials_gone,
+             self.ingress.on.ready,
+             self.ingress.on.revoked,
+             self.oauth.on.oauth_info_changed,
+@@ -229,14 +225,6 @@ class HedgeDocCharm(ops.CharmBase):
+             self._stop_service_quietly()
+             return
+ 
+-        # An s3 relation that has not yet delivered credentials is not the
+-        # same as no relation at all. Treating it as "no relation" would push a
+-        # configuration that writes uploads to local storage, where they are
+-        # then invisible once the credentials do arrive.
+-        if self._s3_is_pending():
+-            logger.info("Object storage integration present but not yet ready.")
+-            return
+-
+         environment = hedgedoc.build_environment(
+             self.config,
+             db_url=db_url,
+@@ -244,7 +232,6 @@ class HedgeDocCharm(ops.CharmBase):
+             # Never None: HedgeDoc must always be told a domain. See
+             # _cluster_url.
+             external_url=self._external_url() or self._cluster_url(),
+-            s3=self._s3_parameters(),
+             oauth=self._oauth_providers(),
+         )
+ 
+@@ -279,10 +266,6 @@ class HedgeDocCharm(ops.CharmBase):
+         except ops.pebble.ConnectionError:
+             logger.debug("Workload container unreachable; cannot stop the service.")
+ 
+-    def _s3_is_pending(self) -> bool:
+-        """Return whether an s3 relation exists but has not supplied credentials."""
+-        return self.model.get_relation("s3") is not None and self._s3_parameters() is None
+-
+     def _on_database_broken(self, event: ops.RelationBrokenEvent) -> None:
+         """Reconcile after a database relation is removed."""
+         self._departing_relation_id = event.relation.id
+@@ -477,21 +460,6 @@ class HedgeDocCharm(ops.CharmBase):
+             use_ssl=False,
+         )
+ 
+-    def _s3_parameters(self) -> hedgedoc.S3Parameters | None:
+-        if self.model.get_relation("s3") is None:
+-            return None
+-        info = self.s3.get_s3_connection_info()
+-        if not info.get("access-key") or not info.get("secret-key"):
+-            return None
+-        return hedgedoc.S3Parameters(
+-            access_key=info["access-key"],
+-            secret_key=info["secret-key"],
+-            bucket=info.get("bucket", "hedgedoc"),
+-            region=info.get("region", ""),
+-            endpoint=info.get("endpoint", ""),
+-            path=info.get("path", "uploads") or "uploads",
+-        )
+-
+     def _oauth_providers(self) -> hedgedoc.OAuthProviders:
+         """Resolve identity-provider settings from integrations and secrets."""
+         return hedgedoc.OAuthProviders(
+diff --git a/src/hedgedoc.py b/src/hedgedoc.py
+index a46989a..c960b7a 100644
+--- a/src/hedgedoc.py
++++ b/src/hedgedoc.py
+@@ -175,18 +175,6 @@ class ExternalUrl:
+         return f"{origin}/{self.path}" if self.path else origin
+ 
+ 
+-@dataclasses.dataclass(frozen=True)
+-class S3Parameters:
+-    """Object-storage parameters for image uploads."""
+-
+-    access_key: str
+-    secret_key: str
+-    bucket: str
+-    region: str = ""
+-    endpoint: str = ""
+-    path: str = "uploads"
+-
+-
+ # HedgeDoc mounts the generic OAuth2 callback at this path, relative to the
+ # externally-visible URL (lib/web/auth/oauth2/index.js).
+ OAUTH2_CALLBACK_PATH = "/auth/oauth2/callback"
+@@ -268,7 +256,6 @@ def build_environment(
+     db_url: str,
+     session_secret: str,
+     external_url: ExternalUrl | None = None,
+-    s3: S3Parameters | None = None,
+     oauth: OAuthProviders | None = None,
+ ) -> dict[str, str]:
+     """Translate charm config and integrations into HedgeDoc's environment.
+@@ -278,7 +265,6 @@ def build_environment(
+         db_url: The fully-formed ``CMD_DB_URL`` value.
+         session_secret: Secret used to sign session cookies.
+         external_url: The externally-visible URL, if known (from ingress/config).
+-        s3: Object-storage parameters, if an S3 integration is present.
+         oauth: Resolved OAuth provider credentials.
+ 
+     Returns:
+@@ -349,20 +335,7 @@ def build_environment(
+         if external_url.path:
+             env["CMD_URL_PATH"] = external_url.path
+ 
+-    # Image upload backend. An S3 integration always wins.
+-    if s3 is not None:
+-        env["CMD_IMAGE_UPLOAD_TYPE"] = "s3"
+-        env["CMD_S3_ACCESS_KEY_ID"] = s3.access_key
+-        env["CMD_S3_SECRET_ACCESS_KEY"] = s3.secret_key
+-        env["CMD_S3_BUCKET"] = s3.bucket
+-        if s3.region:
+-            env["CMD_S3_REGION"] = s3.region
+-        if s3.endpoint:
+-            env["CMD_S3_ENDPOINT"] = s3.endpoint
+-        if s3.path:
+-            env["CMD_S3_FOLDER"] = s3.path
+-    else:
+-        env["CMD_IMAGE_UPLOAD_TYPE"] = str(config["image-upload-type"])
++    env["CMD_IMAGE_UPLOAD_TYPE"] = str(config["image-upload-type"])
+ 
+     _apply_oauth(env, oauth or OAuthProviders())
+     return env
+diff --git a/tests/unit/test_charm.py b/tests/unit/test_charm.py
+index 1772041..6d3d41a 100644
+--- a/tests/unit/test_charm.py
++++ b/tests/unit/test_charm.py
+@@ -326,21 +326,6 @@ def test_ingress_url_sets_domain_protocol_and_path(ctx, container, peer):
+     assert env["CMD_URL_PATH"] == "hedgedoc-k8s"
+ 
+ 
+-def test_s3_relation_sets_upload_environment(ctx, container, peer):
+-    s3 = testing.Relation(
+-        "s3",
+-        interface="s3",
+-        remote_app_data={"access-key": "AK", "secret-key": "SK", "bucket": "mybucket"},
+-    )
+-    state = testing.State(leader=True, containers={container}, relations={peer, s3})
+-    out = ctx.run(ctx.on.config_changed(), state)
+-    env = _hedgedoc_layer(out)
+-    assert env["CMD_IMAGE_UPLOAD_TYPE"] == "s3"
+-    assert env["CMD_S3_ACCESS_KEY_ID"] == "AK"
+-    assert env["CMD_S3_SECRET_ACCESS_KEY"] == "SK"
+-    assert env["CMD_S3_BUCKET"] == "mybucket"
+-
+-
+ def test_postgres_relation_data_builds_db_url(ctx, container, peer, monkeypatch):
+     # Stub only the data-platform library boundary so the charm's real
+     # credential extraction, endpoint selection and URL building run.
+@@ -992,32 +977,6 @@ def test_scaling_back_to_one_unit_restarts_the_workload(ctx, container, peer):
+ # -- Object storage ---------------------------------------------------------
+ 
+ 
+-def test_incomplete_s3_relation_does_not_fall_back_to_the_filesystem(ctx, container, peer):
+-    """Uploads written locally are invisible once the credentials arrive."""
+-    s3 = testing.Relation("s3", interface="s3", remote_app_data={"bucket": "mybucket"})
+-    state = testing.State(leader=True, containers={container}, relations={peer, s3})
+-    out = ctx.run(ctx.on.config_changed(), state)
+-    # No configuration is pushed at all, rather than one naming the filesystem.
+-    assert "hedgedoc" not in out.get_container("hedgedoc").layers
+-
+-
+-def test_s3_credentials_arriving_configures_object_storage(ctx, container, peer):
+-    s3 = testing.Relation("s3", interface="s3", remote_app_data={"bucket": "mybucket"})
+-    state = ctx.run(
+-        ctx.on.config_changed(),
+-        testing.State(leader=True, containers={container}, relations={peer, s3}),
+-    )
+-    ready = dataclasses.replace(
+-        state.get_relation(s3.id),
+-        remote_app_data={"access-key": "AK", "secret-key": "SK", "bucket": "mybucket"},
+-    )
+-    peer_out = state.get_relations("hedgedoc")[0]
+-    out = ctx.run(
+-        ctx.on.relation_changed(ready), dataclasses.replace(state, relations={peer_out, ready})
+-    )
+-    assert _hedgedoc_layer(out)["CMD_IMAGE_UPLOAD_TYPE"] == "s3"
+-
+-
+ # -- Readiness --------------------------------------------------------------
+ 
+ 
+diff --git a/tests/unit/test_hedgedoc.py b/tests/unit/test_hedgedoc.py
+index 8ad9d89..f305895 100644
+--- a/tests/unit/test_hedgedoc.py
++++ b/tests/unit/test_hedgedoc.py
+@@ -128,21 +128,6 @@ def test_external_url_applied_to_environment():
+     assert env["CMD_URL_PATH"] == "hd"
+ 
+ 
+-def test_s3_overrides_upload_type():
+-    env = base_env(
+-        config={"image-upload-type": "filesystem"},
+-        s3=hedgedoc.S3Parameters(
+-            access_key="AK", secret_key="SK", bucket="b", region="r", endpoint="https://s3"
+-        ),
+-    )
+-    assert env["CMD_IMAGE_UPLOAD_TYPE"] == "s3"
+-    assert env["CMD_S3_ACCESS_KEY_ID"] == "AK"
+-    assert env["CMD_S3_SECRET_ACCESS_KEY"] == "SK"
+-    assert env["CMD_S3_BUCKET"] == "b"
+-    assert env["CMD_S3_REGION"] == "r"
+-    assert env["CMD_S3_ENDPOINT"] == "https://s3"
+-
+-
+ def test_oauth_github_credentials_applied():
+     env = base_env(
+         oauth=hedgedoc.OAuthProviders(github={"client-id": "id", "client-secret": "secret"})
+@@ -235,7 +220,6 @@ def test_every_declared_option_is_consumed():
+         # test_external_url_applied_to_environment, and the charm tests.
+         "external-hostname": "CMD_DOMAIN",
+         "external-tls": "CMD_PROTOCOL_USESSL",
+-        # Overridden by an s3 integration; test_s3_overrides_upload_type.
+         "image-upload-type": "CMD_IMAGE_UPLOAD_TYPE",
+     }
+     # Only emitted when the matching credentials secret is configured; covered

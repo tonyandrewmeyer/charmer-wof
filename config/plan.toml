@@ -1,0 +1,27 @@
+# Planner settings. Sampling and budget (PLAN §6) arrive with GHA in phase 3;
+# for now the planner expands the full matrix.
+
+reps = 3
+
+# Per-run caps passed to the harness adapter (§9 used 150 turns, 25 minutes;
+# decided 2026-11-14: 150 turns, 30 minutes, $3, after every phase 1 smoke
+# run stopped at 60 turns / 20 minutes / $1 before finishing).
+[caps]
+max_turns = 150
+timeout_minutes = 30
+max_cost_usd = 3.0
+
+# The anchor set (PLAN §1.1): cells re-run every month so drift in the
+# harness, provider or scoring shows up as the anchors moving. A cell matches
+# when task, harness, model and treatment all match (any rep).
+[[anchors]]
+task = "hedgedoc-ingress"
+harness = "pi"
+model = "deepseek-v4-pro"
+treatment = "none"
+
+[[anchors]]
+task = "hedgedoc-ingress"
+harness = "pi"
+model = "deepseek-v4-pro"
+treatment = "howto"

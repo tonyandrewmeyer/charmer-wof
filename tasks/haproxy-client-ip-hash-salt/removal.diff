@@ -1,0 +1,707 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+new file mode 100644
+index 0000000..9fd2f8f
+--- /dev/null
++++ b/CLAUDE.md
+@@ -0,0 +1,14 @@
++# haproxy
++
++A machine charm for HAProxy, written with the `ops` library. The charm source
++is in `src/` (`charm.py` for the Juju side, `haproxy.py` for rendering the
++configuration and managing the service, `state/` for the validated charm
++state built from config and relations), the HAProxy configuration templates
++in `templates/`, unit tests (ops.testing / Scenario) in `tests/unit/`.
++Charm libraries live under `lib/`.
++
++## Commands
++
++- Unit tests: `tox -e unit` (or `PYTHONPATH=.:lib:src uv run --group unit pytest tests/unit`)
++- Lint: `tox -e lint`
++- Charm linter: `uvx charmlint .`
+diff --git a/charmcraft.yaml b/charmcraft.yaml
+index 3802aac..b91d805 100644
+--- a/charmcraft.yaml
++++ b/charmcraft.yaml
+@@ -112,16 +112,6 @@ config:
+         Send the http response header Strict-Transport-Security for domains provided
+         through the `haproxy-route` relation without the allow_http attribute.
+         The Strict-Transport-Security header value is "max-age=2592000;".
+-    client-ip-hash-salt:
+-      type: secret
+-      description: |
+-        User-owned Juju secret containing the salt used to hash client IPs in
+-        HAProxy access and error logs. Setting this option enables salted SHA-256
+-        hashing; removing it restores plaintext client IP logging. The secret must
+-        contain a `salt` key with a string value that is not empty or only
+-        whitespace. The value must not contain control characters, DEL, double
+-        quotes, backslashes, or dollar signs. The charm does not validate salt
+-        length or entropy.
+ 
+ actions:
+   get-certificate:
+diff --git a/src/charm.py b/src/charm.py
+index 2acd620..f9d6a87 100755
+--- a/src/charm.py
++++ b/src/charm.py
+@@ -9,7 +9,6 @@
+ 
+ import json
+ import logging
+-import re
+ import typing
+ 
+ import ops
+@@ -81,24 +80,12 @@ RECV_CA_CERTS_RELATION = "receive-ca-certs"
+ SPOE_AUTH_RELATION = "spoe-auth"
+ HAPROXY_ROUTE_TCP_RELATION = "haproxy-route-tcp"
+ HAPROXY_ROUTE_POLICY_RELATION_NAME = "haproxy-route-policy"
+-REDACTED_LOG_HASH_SALT = "<redacted>"
+-LOG_HASH_SALT_PATTERN = re.compile(
+-    r'(?P<prefix>concat\(,,\\")[^"\\\r\n]+(?P<suffix>\\"\),sha2\(256\))'
+-)
+ 
+ 
+ class HaproxyUnitAddressNotAvailableError(CharmStateValidationBaseError):
+     """Exception raised when ingress integration is not established."""
+ 
+ 
+-def _redact_log_hash_salt(configuration: str) -> str:
+-    """Redact client IP hash salts from a rendered HAProxy configuration."""
+-    return LOG_HASH_SALT_PATTERN.sub(
+-        lambda match: f"{match.group('prefix')}{REDACTED_LOG_HASH_SALT}{match.group('suffix')}",
+-        configuration,
+-    )
+-
+-
+ # pylint: disable=too-many-instance-attributes
+ class HAProxyCharm(ops.CharmBase):
+     """Charm haproxy."""
+@@ -158,7 +145,6 @@ class HAProxyCharm(ops.CharmBase):
+ 
+         self.framework.observe(self.on.install, self._on_install)
+         self.framework.observe(self.on.config_changed, self._on_config_changed)
+-        self.framework.observe(self.on.secret_changed, self._on_secret_changed)
+         self.framework.observe(self.on.upgrade_charm, self._on_install)
+         self.framework.observe(self.on.get_certificate_action, self._on_get_certificate_action)
+         self.framework.observe(
+@@ -233,11 +219,6 @@ class HAProxyCharm(ops.CharmBase):
+         """Handle the config-changed event."""
+         self._reconcile()
+ 
+-    @validate_config_and_tls(defer=False)
+-    def _on_secret_changed(self, event: ops.SecretChangedEvent) -> None:
+-        """Reconcile when the configured client IP hash salt changes."""
+-        self._reconcile()
+-
+     @validate_config_and_tls(defer=False)
+     def _on_certificate_available(self, _: CertificateAvailableEvent) -> None:
+         """Handle the TLS Certificate available event."""
+@@ -685,7 +666,7 @@ class HAProxyCharm(ops.CharmBase):
+ 
+         event.set_results(
+             {
+-                "configuration": _redact_log_hash_salt(configuration),
++                "configuration": configuration,
+                 "source": "disk",
+             }
+         )
+diff --git a/src/haproxy.py b/src/haproxy.py
+index 8f7e364..52d2f07 100644
+--- a/src/haproxy.py
++++ b/src/haproxy.py
+@@ -124,7 +124,6 @@ class HAProxyService:
+             "peer_units_address": ingress_requirers_information.peers,
+             "ip_allow_list_file": IP_ALLOW_LIST_FILE,
+             "deny_paths_file": DENY_PATHS_FILE,
+-            **self._build_log_template_context(charm_state),
+         }
+         template = (
+             HAPROXY_INGRESS_CONFIG_TEMPLATE
+@@ -182,7 +181,6 @@ class HAProxyService:
+             "deny_paths_file": DENY_PATHS_FILE,
+             "policy_provider_backend": haproxy_route_requirers_information.policy_provider_backend,
+             "default_backend": haproxy_route_requirers_information.default_backend,
+-            **self._build_log_template_context(charm_state),
+         }
+         self._render_haproxy_config(HAPROXY_ROUTE_CONFIG_TEMPLATE, template_context)
+         if spoe_oauth_info_list:
+@@ -237,30 +235,8 @@ class HAProxyService:
+         return {
+             "config_global_max_connection": charm_state.global_max_connection,
+             "ddos_protection": charm_state.ddos_protection,
+-            **self._build_log_template_context(charm_state),
+         }
+ 
+-    @staticmethod
+-    def _build_log_template_context(
+-        charm_state: CharmState,
+-    ) -> dict[str, bool | str | None]:
+-        """Build log-format values only when client IP hashing is enabled."""
+-        context: dict[str, bool | str | None] = {
+-            "hash_client_ip_in_logs": charm_state.hash_client_ip_in_logs,
+-            "http_log_format": None,
+-            "error_log_format": None,
+-            "tcp_log_format": None,
+-        }
+-        if charm_state.hash_client_ip_in_logs:
+-            context.update(
+-                {
+-                    "http_log_format": charm_state.http_log_format,
+-                    "error_log_format": charm_state.error_log_format,
+-                    "tcp_log_format": charm_state.tcp_log_format,
+-                }
+-            )
+-        return context
+-
+     def _render_haproxy_config(self, template_file_path: str, context: dict) -> None:
+         """Render the haproxy configuration file.
+ 
+diff --git a/src/state/charm_state.py b/src/state/charm_state.py
+index ce97237..c51bbdf 100644
+--- a/src/state/charm_state.py
++++ b/src/state/charm_state.py
+@@ -52,16 +52,6 @@ class InvalidCharmConfigError(CharmStateValidationBaseError):
+     """Exception raised when a charm configuration is found to be invalid."""
+ 
+ 
+-# See https://docs.haproxy.org/3.2/configuration.html#7.3.1 for the converters
+-# used here (concat, regsub, sha2, hex).
+-LOG_HASHED_CLIENT_IP_TEMPLATE = (
+-    '%[src,concat(,,),regsub(^::ffff:,),concat(,,\\"{salt}\\"),sha2(256),hex]'
+-)
+-LOG_CLIENT_PORT = "%cp"
+-LOG_CONNECTIONS_STATUS = "%ac/%fc/%bc/%sc/%rc"
+-LOG_QUEUE_STATUS = "%sq/%bq"
+-
+-
+ @dataclass(frozen=True)
+ class CharmState:
+     """A component of charm state that contains the charm's configuration and mode.
+@@ -71,88 +61,12 @@ class CharmState:
+         global_max_connection: The maximum per-process number of concurrent connections.
+         Must be between 0 and "fs.nr_open" sysctl config.
+         ddos_protection: Whether to enable basic DDoS protection mechanisms.
+-        client_ip_hash_salt: Salt used to hash client IP addresses in logs.
+     """
+ 
+     mode: ProxyMode
+     enable_hsts: bool
+     global_max_connection: int = Field(gt=0, alias="global_max_connection")
+     ddos_protection: bool = True
+-    client_ip_hash_salt: str | None = Field(default=None, repr=False)
+-
+-    @property
+-    def hash_client_ip_in_logs(self) -> bool:
+-        """Return whether client IP hashing is enabled."""
+-        return self.client_ip_hash_salt is not None
+-
+-    @property
+-    def log_hash_client_address(self) -> str:
+-        """Return the log format for a hashed client address."""
+-        if not self.client_ip_hash_salt:
+-            raise ValueError("log_hash_client_address requires client_ip_hash_salt.")
+-        hashed_client_ip = LOG_HASHED_CLIENT_IP_TEMPLATE.format(salt=self.client_ip_hash_salt)
+-        return f"{hashed_client_ip}:{LOG_CLIENT_PORT}"
+-
+-    # See https://docs.haproxy.org/3.2/configuration.html#8.2.3 "HTTP log format".
+-    @property
+-    def http_log_format(self) -> str:
+-        """Return HAProxy's default HTTP log format with a hashed client IP."""
+-        return (
+-            f"{self.log_hash_client_address} [%tr] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta "
+-            f"%ST %B %CC %CS %tsc {LOG_CONNECTIONS_STATUS} {LOG_QUEUE_STATUS} "
+-            "%hr %hs %{+Q}r"
+-        )
+-
+-    # See https://docs.haproxy.org/3.2/configuration.html#8.2.5 "Error log format".
+-    @property
+-    def error_log_format(self) -> str:
+-        """Return HAProxy's default error log format with a hashed client IP."""
+-        timestamp = "%t" if self.mode == ProxyMode.HAPROXY_ROUTE else "%tr"
+-        return (
+-            f"{self.log_hash_client_address} [{timestamp}] %[fe_name]/%[so_id]: "
+-            "%[fc_err_str] (%[ssl_fc_err_str])"
+-        )
+-
+-    # See https://docs.haproxy.org/3.2/configuration.html#8.2.2 "TCP log format".
+-    @property
+-    def tcp_log_format(self) -> str:
+-        """Return HAProxy's default TCP log format with a hashed client IP."""
+-        return (
+-            f"{self.log_hash_client_address} [%t] %ft %b/%s %Tw/%Tc/%Tt %B %ts "
+-            f"{LOG_CONNECTIONS_STATUS} {LOG_QUEUE_STATUS}"
+-        )
+-
+-    @staticmethod
+-    def _get_client_ip_hash_salt(charm: ops.CharmBase) -> str | None:
+-        """Return and validate the configured client IP hash salt."""
+-        secret_uri = typing.cast(str | None, charm.config.get("client-ip-hash-salt"))
+-        if not isinstance(secret_uri, str) or not secret_uri.strip():
+-            return None
+-
+-        try:
+-            secret_content = charm.model.get_secret(id=secret_uri).get_content(refresh=True)
+-        except (ops.SecretNotFoundError, ops.ModelError) as exc:
+-            raise InvalidCharmConfigError(
+-                "The client-ip-hash-salt secret does not exist or cannot be accessed."
+-            ) from exc
+-
+-        client_ip_hash_salt = secret_content.get("salt")
+-        if not isinstance(client_ip_hash_salt, str) or not client_ip_hash_salt.strip():
+-            raise InvalidCharmConfigError(
+-                "The client-ip-hash-salt secret must contain a non-empty 'salt' value."
+-            )
+-        # "$" is rejected because HAProxy expands "$NAME"/"${NAME}" as an environment
+-        # variable inside double-quoted strings (see configuration.html#2.3), which
+-        # would either silently change the effective salt or fail config validation.
+-        if any(
+-            character in {'"', "\\", "$"} or ord(character) < 32 or ord(character) == 127
+-            for character in client_ip_hash_salt
+-        ):
+-            raise InvalidCharmConfigError(
+-                "The client-ip-hash-salt secret must not contain control characters, "
+-                "double quotes, backslashes, or dollar signs."
+-            )
+-        return client_ip_hash_salt
+ 
+     @field_validator("global_max_connection")
+     @classmethod
+@@ -267,7 +181,6 @@ class CharmState:
+         global_max_connection = typing.cast(int, charm.config.get("global-maxconn"))
+         enable_hsts = typing.cast(bool, charm.config.get("enable-hsts"))
+         ddos_protection = typing.cast(bool, charm.config.get("ddos-protection"))
+-        client_ip_hash_salt = cls._get_client_ip_hash_salt(charm)
+ 
+         try:
+             return cls(
+@@ -281,7 +194,6 @@ class CharmState:
+                 global_max_connection=global_max_connection,
+                 enable_hsts=enable_hsts,
+                 ddos_protection=ddos_protection,
+-                client_ip_hash_salt=client_ip_hash_salt,
+             )
+         except ValidationError as exc:
+             error_field_str = ",".join(f"{field}" for field in get_invalid_config_fields(exc))
+diff --git a/templates/haproxy.cfg.j2 b/templates/haproxy.cfg.j2
+index c798d6a..5ebfd84 100644
+--- a/templates/haproxy.cfg.j2
++++ b/templates/haproxy.cfg.j2
+@@ -74,10 +74,6 @@ defaults
+ {% endif %}
+     timeout connect 5000
+     timeout server 50000
+-{% if hash_client_ip_in_logs %}
+-    log-format "{{ http_log_format }}"
+-    error-log-format "{{ error_log_format }}"
+-{% endif %}
+ 
+ frontend prometheus
+     bind :8404
+diff --git a/templates/haproxy_route_tcp.cfg.j2 b/templates/haproxy_route_tcp.cfg.j2
+index 944e23b..5e19587 100644
+--- a/templates/haproxy_route_tcp.cfg.j2
++++ b/templates/haproxy_route_tcp.cfg.j2
+@@ -20,12 +20,6 @@ send-proxy-v2
+ frontend haproxy_route_tcp_{{ frontend.bind_port }}
+     mode tcp
+     option tcplog
+-{% if hash_client_ip_in_logs %}
+-    # option tcplog above would otherwise override the defaults log-format and
+-    # log plaintext client IPs; this is the tcplog default with only %ci
+-    # replaced by the salted hash.
+-    log-format "{{ tcp_log_format }}"
+-{% endif %}
+     bind [::]:{{ frontend.bind_port }} v4v6 {% if frontend.tls_terminate %} ssl crt {{ haproxy_crt_dir }} {% endif +%}
+ 
+ {# DDOS protection configuration. #}
+diff --git a/tests/unit/conftest.py b/tests/unit/conftest.py
+index 82ce9f2..a45d33e 100644
+--- a/tests/unit/conftest.py
++++ b/tests/unit/conftest.py
+@@ -31,24 +31,8 @@ from charms.haproxy.v2.haproxy_route import (
+ from ops.testing import Context
+ 
+ from charm import HAProxyCharm
+-from state.charm_state import CharmState, ProxyMode
+ 
+ TEST_EXTERNAL_HOSTNAME_CONFIG = "haproxy.internal"
+-TEST_LOG_HASH_SALT = "test-salt"
+-TEST_LOG_HASH_CLIENT_ADDRESS = (
+-    f'%[src,concat(,,),regsub(^::ffff:,),concat(,,\\"{TEST_LOG_HASH_SALT}\\"),sha2(256),hex]:%cp'
+-)
+-
+-
+-@pytest.fixture(name="hashed_charm_state")
+-def hashed_charm_state_fixture() -> CharmState:
+-    """Return a minimal CharmState with client IP hashing enabled."""
+-    return CharmState(
+-        mode=ProxyMode.NOPROXY,
+-        enable_hsts=False,
+-        global_max_connection=1024,
+-        client_ip_hash_salt=TEST_LOG_HASH_SALT,
+-    )
+ 
+ 
+ @pytest.fixture(scope="function", name="systemd_mock")
+diff --git a/tests/unit/test_charm.py b/tests/unit/test_charm.py
+index b9e05db..302d75a 100644
+--- a/tests/unit/test_charm.py
++++ b/tests/unit/test_charm.py
+@@ -15,14 +15,10 @@ import pytest
+ 
+ import tls_relation
+ from charm import CharmStateValidationBaseError, HAProxyCharm
+-from tests.unit.conftest import (
+-    TEST_EXTERNAL_HOSTNAME_CONFIG,
+-    TEST_LOG_HASH_CLIENT_ADDRESS,
+-    TEST_LOG_HASH_SALT,
+-)
++from tests.unit.conftest import TEST_EXTERNAL_HOSTNAME_CONFIG
+ 
+ from .conftest import build_haproxy_route_relation, build_spoe_auth_relation
+-from .helper import RegexMatcher, rendered_file_content
++from .helper import RegexMatcher
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -41,148 +37,6 @@ def test_install(context_with_install_mock, base_state, event):
+     reconcile_default_mock.assert_called_once()
+ 
+ 
+-@pytest.mark.usefixtures("systemd_mock", "mocks_external_calls")
+-@pytest.mark.parametrize(
+-    "configure_salt,expected_present",
+-    [(False, False), (True, True)],
+-    ids=["salt_removed", "salt_configured"],
+-)
+-def test_config_changed_client_ip_hash_salt(
+-    monkeypatch: pytest.MonkeyPatch, peer_relation, configure_salt, expected_present
+-):
+-    """
+-    arrange: prepare a state with or without a client IP hash salt.
+-    act: run config-changed.
+-    assert: the rendered config hashes client IPs only when the salt is configured.
+-    """
+-    render_file_mock = MagicMock()
+-    monkeypatch.setattr("haproxy.render_file", render_file_mock)
+-    context = ops.testing.Context(HAProxyCharm)
+-    log_hash_salt = ops.testing.Secret(tracked_content={"salt": TEST_LOG_HASH_SALT})
+-    state = ops.testing.State(relations=[peer_relation], leader=True)
+-    if configure_salt:
+-        state = ops.testing.State(
+-            relations=[peer_relation],
+-            leader=True,
+-            config={"client-ip-hash-salt": log_hash_salt.id},
+-            secrets=[log_hash_salt],
+-        )
+-
+-    context.run(context.on.config_changed(), state)
+-
+-    render_file_mock.assert_called_once()
+-    config_content = rendered_file_content(render_file_mock)
+-    assert (f'log-format "{TEST_LOG_HASH_CLIENT_ADDRESS}' in config_content) is expected_present
+-    assert (
+-        f'error-log-format "{TEST_LOG_HASH_CLIENT_ADDRESS}' in config_content
+-    ) is expected_present
+-
+-
+-@pytest.mark.usefixtures("systemd_mock", "mocks_external_calls")
+-def test_config_changed_client_ip_hash_salt_rejects_inaccessible_secret(
+-    monkeypatch: pytest.MonkeyPatch, peer_relation
+-):
+-    """
+-    arrange: configure an ID for a salt secret that is not available to the charm.
+-    act: run config-changed.
+-    assert: the unit is blocked and the HAProxy config is not rendered.
+-    """
+-    render_file_mock = MagicMock()
+-    monkeypatch.setattr("haproxy.render_file", render_file_mock)
+-    context = ops.testing.Context(HAProxyCharm)
+-    inaccessible_secret = ops.testing.Secret(tracked_content={"salt": TEST_LOG_HASH_SALT})
+-    state = ops.testing.State(
+-        relations=[peer_relation],
+-        leader=True,
+-        config={"client-ip-hash-salt": inaccessible_secret.id},
+-    )
+-
+-    out = context.run(context.on.config_changed(), state)
+-
+-    assert out.unit_status == ops.testing.BlockedStatus(
+-        "The client-ip-hash-salt secret does not exist or cannot be accessed."
+-    )
+-    render_file_mock.assert_not_called()
+-
+-
+-@pytest.mark.usefixtures("systemd_mock", "mocks_external_calls")
+-@pytest.mark.parametrize(
+-    "secret_content",
+-    [
+-        pytest.param({"other": "value"}, id="missing_key"),
+-        pytest.param({"salt": ""}, id="empty"),
+-        pytest.param({"salt": "   "}, id="whitespace"),
+-    ],
+-)
+-def test_config_changed_client_ip_hash_salt_rejects_blank_value(
+-    monkeypatch: pytest.MonkeyPatch,
+-    peer_relation,
+-    secret_content: dict[str, str],
+-):
+-    """
+-    arrange: prepare a state with hashing enabled and a missing or blank salt.
+-    act: run config-changed.
+-    assert: the unit is blocked and the HAProxy config is not rendered.
+-    """
+-    render_file_mock = MagicMock()
+-    monkeypatch.setattr("haproxy.render_file", render_file_mock)
+-    context = ops.testing.Context(HAProxyCharm)
+-    log_hash_salt = ops.testing.Secret(tracked_content=secret_content)
+-    state = ops.testing.State(
+-        relations=[peer_relation],
+-        leader=True,
+-        config={"client-ip-hash-salt": log_hash_salt.id},
+-        secrets=[log_hash_salt],
+-    )
+-
+-    out = context.run(context.on.config_changed(), state)
+-
+-    assert out.unit_status == ops.testing.BlockedStatus(
+-        "The client-ip-hash-salt secret must contain a non-empty 'salt' value."
+-    )
+-    render_file_mock.assert_not_called()
+-
+-
+-@pytest.mark.usefixtures("systemd_mock", "mocks_external_calls")
+-@pytest.mark.parametrize(
+-    "salt",
+-    [
+-        pytest.param('unsafe"salt', id="quote"),
+-        pytest.param("unsafe\\salt", id="backslash"),
+-        pytest.param("unsafe\nsalt", id="control_character"),
+-        pytest.param("unsafe$salt", id="dollar_sign"),
+-    ],
+-)
+-def test_config_changed_client_ip_hash_salt_rejects_unsafe_value(
+-    monkeypatch: pytest.MonkeyPatch,
+-    peer_relation,
+-    salt: str,
+-):
+-    """
+-    arrange: prepare a state with hashing enabled and a salt containing an unsafe character.
+-    act: run config-changed.
+-    assert: the unit is blocked and the HAProxy config is not rendered.
+-    """
+-    render_file_mock = MagicMock()
+-    monkeypatch.setattr("haproxy.render_file", render_file_mock)
+-    context = ops.testing.Context(HAProxyCharm)
+-    log_hash_salt = ops.testing.Secret(tracked_content={"salt": salt})
+-    state = ops.testing.State(
+-        relations=[peer_relation],
+-        leader=True,
+-        config={"client-ip-hash-salt": log_hash_salt.id},
+-        secrets=[log_hash_salt],
+-    )
+-
+-    out = context.run(context.on.config_changed(), state)
+-
+-    assert out.unit_status == ops.testing.BlockedStatus(
+-        "The client-ip-hash-salt secret must not contain control characters, "
+-        "double quotes, backslashes, or dollar signs."
+-    )
+-    render_file_mock.assert_not_called()
+-
+-
+ @pytest.mark.usefixtures("systemd_mock", "mocks_external_calls")
+ def test_non_leader_waiting_for_peer_data(peer_relation, certificates_integration):
+     """
+@@ -704,40 +558,6 @@ def test_get_configuration_returns_disk_config(monkeypatch: pytest.MonkeyPatch)
+     assert context.action_results == {"configuration": content, "source": "disk"}
+ 
+ 
+-@pytest.mark.usefixtures("systemd_mock", "mocks_external_calls")
+-def test_get_configuration_redacts_log_hash_salt(monkeypatch: pytest.MonkeyPatch) -> None:
+-    """
+-    arrange: mock on-disk formats containing a salt different from the current secret.
+-    act: trigger the get-configuration action.
+-    assert: every on-disk salt is redacted without changing the rest of the configuration.
+-    """
+-    content = "\n".join(
+-        [
+-            f'log-format "{TEST_LOG_HASH_CLIENT_ADDRESS} HTTP"',
+-            f'error-log-format "{TEST_LOG_HASH_CLIENT_ADDRESS} ERROR"',
+-            f'log-format "{TEST_LOG_HASH_CLIENT_ADDRESS} TCP"',
+-        ]
+-    )
+-    monkeypatch.setattr("charm.file_exists", MagicMock(return_value=True))
+-    monkeypatch.setattr("charm.read_file", MagicMock(return_value=content))
+-    context = ops.testing.Context(HAProxyCharm)
+-    log_hash_salt = ops.testing.Secret(tracked_content={"salt": "different-current-salt"})
+-    state = ops.testing.State(
+-        leader=True,
+-        config={"client-ip-hash-salt": log_hash_salt.id},
+-        secrets=[log_hash_salt],
+-    )
+-
+-    context.run(context.on.action("get-configuration"), state)
+-
+-    results = context.action_results
+-    assert results is not None
+-    configuration = results["configuration"]
+-    assert configuration == content.replace(TEST_LOG_HASH_SALT, "<redacted>")
+-    assert TEST_LOG_HASH_SALT not in configuration
+-    assert configuration.count("<redacted>") == 3
+-
+-
+ @pytest.mark.usefixtures("systemd_mock", "mocks_external_calls")
+ def test_get_configuration_missing_file_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+     """
+diff --git a/tests/unit/test_haproxy_service.py b/tests/unit/test_haproxy_service.py
+index ddbd06e..010994a 100644
+--- a/tests/unit/test_haproxy_service.py
++++ b/tests/unit/test_haproxy_service.py
+@@ -3,7 +3,6 @@
+ 
+ """Unit tests for charm file."""
+ 
+-from dataclasses import replace
+ from unittest.mock import MagicMock
+ 
+ import pytest
+@@ -55,26 +54,3 @@ def test_deploy(monkeypatch: pytest.MonkeyPatch):
+     systemd_mock.service_restart.assert_called_once_with("logrotate.timer")
+ 
+ 
+-def test_render_default_config_hashes_client_ip_when_enabled(hashed_charm_state):
+-    """
+-    arrange: Given a charm state with hash_client_ip_in_logs enabled.
+-    act: Render the default haproxy configuration.
+-    assert: The config overrides log-format and error-log-format to hash the client IP.
+-    """
+-    config = HAProxyService().render_default_config(hashed_charm_state)
+-
+-    assert f'log-format "{hashed_charm_state.log_hash_client_address}' in config
+-    assert f'error-log-format "{hashed_charm_state.log_hash_client_address}' in config
+-
+-
+-def test_render_default_config_logs_plaintext_client_ip_when_disabled(hashed_charm_state):
+-    """
+-    arrange: Given a charm state without a client IP hash salt.
+-    act: Render the default haproxy configuration.
+-    assert: No log-format overrides are set, so client IPs are logged in plaintext.
+-    """
+-    charm_state = replace(hashed_charm_state, client_ip_hash_salt=None)
+-    config = HAProxyService().render_default_config(charm_state)
+-
+-    assert "log-format" not in config
+-    assert "error-log-format" not in config
+diff --git a/tests/unit/test_state.py b/tests/unit/test_state.py
+index 7b64358..59cdb31 100644
+--- a/tests/unit/test_state.py
++++ b/tests/unit/test_state.py
+@@ -4,7 +4,6 @@
+ """Unit tests for the states of different modes."""
+ 
+ import typing
+-from dataclasses import replace
+ from ipaddress import IPv4Address
+ from unittest.mock import MagicMock, Mock
+ 
+@@ -62,7 +61,6 @@ from state.ingress_per_unit import (
+ )
+ from state.tls import TLSInformation
+ 
+-from .conftest import TEST_LOG_HASH_CLIENT_ADDRESS
+ 
+ 
+ def test_ingress_per_unit_from_provider():
+@@ -2152,91 +2150,3 @@ def test_haproxy_route_tcp_port_range_config_rendering(
+     assert "server tcp-route-requirer-0" in rendered
+ 
+ 
+-def test_haproxy_route_tcp_config_hashes_client_ip(
+-    hashed_charm_state,
+-    haproxy_route_tcp_relation_data: typing.Callable[..., HaproxyRouteTcpRequirerData],
+-):
+-    """
+-    arrange: Generate a TCP frontend and enable client IP hashing.
+-    act: Render the TCP frontend template.
+-    assert: The TCP log format contains the salted client address hash.
+-    """
+-    tcp_requirers = HaproxyRouteTcpRequirersData(
+-        requirers_data=[haproxy_route_tcp_relation_data(port=4444)],
+-        relation_ids_with_invalid_data=set(),
+-    )
+-    frontends = parse_haproxy_route_tcp_requirers_data(tcp_requirers)
+-    env = Environment(
+-        loader=FileSystemLoader("templates"),
+-        autoescape=select_autoescape(),
+-        keep_trailing_newline=True,
+-        trim_blocks=True,
+-        lstrip_blocks=True,
+-    )
+-
+-    rendered = env.get_template("haproxy_route_tcp.cfg.j2").render(
+-        tcp_frontends=frontends,
+-        haproxy_crt_dir="/etc/haproxy/certs",
+-        ddos_protection_config=DDosProtection(),
+-        ip_allow_list_file="/etc/haproxy/ip_allow_list",
+-        hash_client_ip_in_logs=True,
+-        tcp_log_format=hashed_charm_state.tcp_log_format,
+-    )
+-
+-    assert f'log-format "{TEST_LOG_HASH_CLIENT_ADDRESS} ' in rendered
+-
+-
+-def test_charm_state_http_log_format_matches_haproxy_default(hashed_charm_state):
+-    """
+-    arrange: Access the default http_log_format.
+-    act: Compare it with HAProxy's default HTTP log format.
+-    assert: Only the %ci:%cp client field is replaced by the salted hash; every
+-        other variable matches the HAProxy default.
+-    """
+-    haproxy_default = (
+-        "%ci:%cp [%tr] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %CC %CS %tsc "
+-        "%ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs %{+Q}r"
+-    )
+-    assert hashed_charm_state.http_log_format == haproxy_default.replace(
+-        "%ci:%cp", TEST_LOG_HASH_CLIENT_ADDRESS, 1
+-    )
+-
+-
+-def test_charm_state_error_log_format_matches_haproxy_default(hashed_charm_state):
+-    """
+-    arrange: Access the default error_log_format.
+-    act: Compare it with HAProxy's default error log format.
+-    assert: Only the %ci:%cp client field is replaced by the salted hash; every
+-        other variable matches the HAProxy default.
+-    """
+-    haproxy_default = "%ci:%cp [%tr] %[fe_name]/%[so_id]: %[fc_err_str] (%[ssl_fc_err_str])"
+-    assert hashed_charm_state.error_log_format == haproxy_default.replace(
+-        "%ci:%cp", TEST_LOG_HASH_CLIENT_ADDRESS, 1
+-    )
+-
+-
+-def test_charm_state_error_log_format_supports_tcp_frontends(hashed_charm_state):
+-    """
+-    arrange: Use client IP hashing in the mixed HTTP and TCP proxy mode.
+-    act: Access the error log format inherited by all frontends.
+-    assert: The timestamp uses the mode-neutral HAProxy variable.
+-    """
+-    charm_state = replace(hashed_charm_state, mode=ProxyMode.HAPROXY_ROUTE)
+-
+-    assert charm_state.error_log_format == (
+-        f"{TEST_LOG_HASH_CLIENT_ADDRESS} [%t] "
+-        "%[fe_name]/%[so_id]: %[fc_err_str] (%[ssl_fc_err_str])"
+-    )
+-
+-
+-def test_charm_state_tcp_log_format_matches_haproxy_default(hashed_charm_state):
+-    """
+-    arrange: Access the default tcp_log_format.
+-    act: Compare it with HAProxy's default TCP log format (option tcplog).
+-    assert: Only the %ci:%cp client field is replaced by the salted hash; every
+-        other variable matches the HAProxy default.
+-    """
+-    haproxy_default = "%ci:%cp [%t] %ft %b/%s %Tw/%Tc/%Tt %B %ts %ac/%fc/%bc/%sc/%rc %sq/%bq"
+-    assert hashed_charm_state.tcp_log_format == haproxy_default.replace(
+-        "%ci:%cp", TEST_LOG_HASH_CLIENT_ADDRESS, 1
+-    )

@@ -1,0 +1,161 @@
+# Failure-tag vocabulary (PLAN §8, 2026-11-09: the failure taxonomy needs
+# structured tags, not only prose). A tier may only emit tags listed here
+# for that tier; records with unknown tags fail validation. Adding a tag is
+# backwards-compatible; renaming or removing one is not (keep old ones and
+# mark them deprecated instead).
+
+[tags.pack-failed]
+tiers = ["static", "live"]
+description = "charmcraft pack failed, or charmcraft.yaml did not validate."
+
+[tags.charm-lib-missing]
+tiers = ["static", "judge"]
+description = "A charm library the feature needs is not declared under charm-libs."
+
+[tags.charm-lib-misnamed]
+tiers = ["static", "judge"]
+description = "A charm-libs entry names the library wrongly (e.g. traefik-k8s.ingress)."
+
+[tags.endpoint-missing]
+tiers = ["static", "judge"]
+description = "The relation endpoint the feature needs is not declared, or has the wrong interface."
+
+[tags.action-missing]
+tiers = ["static", "judge"]
+description = "An action the feature needs is not declared (charmcraft.yaml actions, or actions.yaml)."
+
+[tags.config-option-missing]
+tiers = ["static", "judge"]
+description = "A config option the feature needs is not declared (charmcraft.yaml config, or config.yaml)."
+
+[tags.lint-regression]
+tiers = ["static"]
+description = "ruff or charmlint findings went up relative to the base."
+
+[tags.oracle-collection-error]
+tiers = ["oracle"]
+description = "The hidden oracle could not be collected (import error, syntax error)."
+
+[tags.key-oracle-test-failed]
+tiers = ["oracle"]
+description = "The oracle's key test for the task's feature failed, whatever the rest scored."
+
+[tags.deploy-failed]
+tiers = ["live"]
+description = "juju deploy did not reach a settled state."
+
+[tags.status-blocked]
+tiers = ["live"]
+description = "The unit settled in blocked status."
+
+[tags.status-error]
+tiers = ["live"]
+description = "The unit went into error status (hook failure)."
+
+[tags.relation-not-established]
+tiers = ["live"]
+description = "A relation the feature needs never completed."
+
+[tags.workload-unreachable]
+tiers = ["live"]
+description = "The workload did not answer where it should (directly or through the ingress)."
+
+[tags.wrong-external-url]
+tiers = ["live", "judge"]
+description = "Generated links or redirects use the wrong host, scheme or sub-path."
+
+[tags.prefix-not-stripped]
+tiers = ["live", "judge"]
+description = "The ingress requirer does not ask the proxy to strip the path prefix (the round-2 / §9 failure)."
+
+[tags.integration-test-failed]
+tiers = ["live"]
+description = "The gold charm's integration tests for the feature failed."
+
+[tags.timeout]
+tiers = ["live"]
+description = "The live tier hit its time cap."
+
+[tags.config-precedence-wrong]
+tiers = ["judge"]
+description = "Relation data and config options take precedence the wrong way round."
+
+[tags.no-fallback]
+tiers = ["judge"]
+description = "Behaviour does not fall back correctly when the relation goes away."
+
+[tags.events-not-observed]
+tiers = ["judge"]
+description = "Library or relation events are not wired into reconciliation."
+
+[tags.status-outside-collect-status]
+tiers = ["judge"]
+description = "Unit status is set outside the collect-status handler, against the charm's pattern."
+
+[tags.not-idiomatic]
+tiers = ["judge"]
+description = "Works, but does not follow ops idioms or the charm's own structure."
+
+[tags.tests-missing]
+tiers = ["judge"]
+description = "No new tests for the new behaviour."
+
+[tags.tests-shallow]
+tiers = ["judge"]
+description = "Tests exercise helpers or private attributes rather than behaviour through State."
+
+[tags.built-to-the-test]
+tiers = ["judge"]
+description = "Makes supplied tests pass without the conventions the prose asks for (§9 item 4)."
+
+[tags.collateral-damage]
+tiers = ["judge"]
+description = "Unrelated changes, deletions, or broken existing behaviour."
+
+[tags.lint-config-weakened]
+tiers = ["judge"]
+description = "Lint or test configuration loosened to get green."
+
+[tags.vendored-lib-edited]
+tiers = ["judge"]
+description = "Edits to a vendored charm library under lib/."
+
+[tags.near-verbatim-upstream]
+tiers = ["judge"]
+description = "The diff is a near-verbatim copy of the upstream implementation (contamination, PLAN §2.3)."
+
+[tags.agent-gave-up]
+tiers = ["process"]
+description = "The agent stopped without attempting the change."
+
+[tags.turn-cap]
+tiers = ["process"]
+description = "The run hit the turn cap."
+
+[tags.time-cap]
+tiers = ["process"]
+description = "The run hit the wall-time cap."
+
+[tags.cost-cap]
+tiers = ["process"]
+description = "The run hit the per-run dollar cap."
+
+[tags.no-edits]
+tiers = ["process"]
+description = "The agent changed nothing in the workspace (without saying it gave up)."
+
+[tags.only-vendored-libs-changed]
+tiers = ["static"]
+description = "Every change is under lib/ (fetched or edited charm libraries); the charm's own code is untouched."
+
+# Gold-copy detection (2026-11-18, PLAN §2.3 and §7; HARNESS.md "Gold-copy
+# detection"). Both flag a run for review: the record is stored as usual and a
+# person moves a confirmed one to results/invalid/.
+
+[tags.gold-copied]
+tiers = ["static"]
+description = "The agent's diff is a near-verbatim copy of the gold's own change (the removal diff reversed)."
+
+[tags.gold-fetched]
+tiers = ["process"]
+description = "A tool call that fetched something named the gold repo or the gold SHA (a raw file, a clone, a code search for it)."
