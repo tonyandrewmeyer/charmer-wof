@@ -412,6 +412,10 @@ class OpenCodeAdapter:
             OPENROUTER_API_KEY=key,
             UV_CONSTRAINT=str(constraints),
             OPENCODE_DISABLE_FREE_MODELS="1",
+            # Use the catalogue bundled with the pinned release rather than
+            # fetching models.opencode.ai at start-up (an egress the agent job
+            # doesn't allow, and a catalogue that would change under the pin).
+            OPENCODE_DISABLE_MODELS_FETCH="1",
             OTEL_SDK_DISABLED="true",
             NO_PROXY=no_proxy,
             no_proxy=no_proxy,

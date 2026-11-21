@@ -162,6 +162,7 @@ def test_environment_fresh_home_key_and_charmlint_pin(tmp_path):
     assert env["OPENROUTER_API_KEY"] == "sk-test"
     assert not {"OPENCODE_CONFIG", "OPENCODE_DB", "XDG_CONFIG_HOME"} & set(env)
     assert env["OPENCODE_DISABLE_FREE_MODELS"] == "1"
+    assert env["OPENCODE_DISABLE_MODELS_FETCH"] == "1"
     assert env["NO_PROXY"] == env["no_proxy"] == "example.com,127.0.0.1,localhost"
     assert env["UV_PYTHON"] == "3.12" and env["UV_CACHE_DIR"] == "/root/.cache/uv"
     assert pathlib.Path(env["UV_CONSTRAINT"]).read_text() == "charmlint==0.3.0\n"

@@ -30,6 +30,27 @@ case "$harness" in
     npm install --prefix "$tools/opencode" --no-fund --no-audit --loglevel=error \
       "@opencode/cli@${version}"
     ln -sf ../opencode/node_modules/.bin/opencode "$tools/bin/opencode"
+    # OpenCode's grep and glob tools use `rg` from PATH, and download it from
+    # GitHub when it isn't there, which the agent job blocks. Install the
+    # ripgrep release OpenCode itself would fetch, with the SHA-256 it pins
+    # (packages/core/src/ripgrep/binary.ts in the OpenCode release).
+    case "$version" in
+      2.2.6) rg_version=15.1.0 rg_sha=1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599 ;;
+      *) echo "::error::no pinned ripgrep for OpenCode ${version}; add it to ci/install-harness.sh"; exit 1 ;;
+    esac
+    rg_name="ripgrep-${rg_version}-x86_64-unknown-linux-musl"
+    curl -fsSL --max-time 120 \
+      "https://github.com/BurntSushi/ripgrep/releases/download/${rg_version}/${rg_name}.tar.gz" \
+      -o "$tools/${rg_name}.tar.gz"
+    got="$(sha256sum "$tools/${rg_name}.tar.gz" | cut -d' ' -f1)"
+    if [ "$got" != "$rg_sha" ]; then
+      echo "::error::ripgrep ${rg_version} download has sha256 ${got}, pinned ${rg_sha}"
+      exit 1
+    fi
+    tar -xzf "$tools/${rg_name}.tar.gz" -C "$tools" "${rg_name}/rg"
+    mv -f "$tools/${rg_name}/rg" "$tools/bin/rg"
+    rm -rf "${tools:?}/${rg_name}" "${tools:?}/${rg_name}.tar.gz"
+    echo "rg: $("$tools/bin/rg" --version | head -1)"
     ;;
   omp)
     # omp's prebuilt binary from build.stencil.so, the way its installer

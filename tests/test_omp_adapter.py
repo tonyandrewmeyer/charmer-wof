@@ -117,6 +117,22 @@ def test_overlay_turns_off_ambient_discovery():
     assert "enableProjectConfig: false" in omp.OVERLAY
 
 
+def test_overlay_turns_off_keyless_model_discovery():
+    # The catalogue hosts egress-audit.yml saw omp 18.19.0 reach besides OpenRouter.
+    for provider in (
+        "zenmux",
+        "kilo",
+        "venice",
+        "alibaba-coding-plan",
+        "charm-hyper",
+        "commandcode",
+    ):
+        assert f"  - {provider}\n" in omp.OVERLAY
+    for local in ("ollama", "lm-studio", "llama.cpp"):
+        assert f"  - {local}\n" in omp.OVERLAY
+    assert "  - openrouter\n" not in omp.OVERLAY
+
+
 def test_environment_fresh_home_key_and_charmlint_pin(tmp_path):
     adapter = omp.OmpAdapter("18.19.0", charmlint="0.3.0")
     base = {

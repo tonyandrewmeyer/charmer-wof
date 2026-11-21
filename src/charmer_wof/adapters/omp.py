@@ -238,11 +238,20 @@ DISABLED_PROVIDERS = (
     "omp-plugins", "agent-plugins", "skillshare", "custom-context", "ssh-json",
 )  # fmt: skip
 
+# Model providers whose catalogues omp fetches at start-up without a key, and
+# the local servers it probes. The same ``disabledProviders`` setting switches
+# them off. Without this, omp 18.19.0 reached seven catalogue hosts besides
+# OpenRouter on every run, which the agent job's egress allowlist blocks.
+DISABLED_MODEL_PROVIDERS = (
+    "zenmux", "kilo", "venice", "alibaba-coding-plan", "charm-hyper", "commandcode",
+    "ollama", "lm-studio", "llama.cpp",
+)  # fmt: skip
+
 # The --config overlay (it outranks project settings). Quoted "off": YAML 1.1
 # reads a bare off as false.
 OVERLAY = (
     "disabledProviders:\n"
-    + "".join(f"  - {p}\n" for p in DISABLED_PROVIDERS)
+    + "".join(f"  - {p}\n" for p in (*DISABLED_PROVIDERS, *DISABLED_MODEL_PROVIDERS))
     + """providers:
   cacheWarming: "off"
 web_search:
