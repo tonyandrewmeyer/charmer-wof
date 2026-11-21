@@ -22,6 +22,7 @@ case "$1" in
     # Leave a marker so the test can see where pack ran.
     pwd > "$FAKE_PACK_LOG"
     ls -a >> "$FAKE_PACK_LOG"
+    echo "commits=$(git rev-list --count HEAD 2>/dev/null)" >> "$FAKE_PACK_LOG"
     case "$FAKE_PACK" in
       ok) echo "Packed test-charm_amd64.charm"; : > test-charm_amd64.charm; exit 0 ;;
       nocharm) echo "Packed nothing"; exit 0 ;;
@@ -69,11 +70,16 @@ def test_pass(tmp_path, fake_charmcraft):
     assert out["reason"] is None
     assert out["charms"] == ["test-charm_amd64.charm"]
     assert out["charmcraft_version"] == "charmcraft 9.9.9"
-    # Packed in a copy, without the harness's files, git or the venv...
+    # Packed in a copy, without the harness's files, the workspace's git or
+    # the venv...
     ran_in, *listing = log.read_text().split()
     assert pathlib.Path(ran_in) != ws
     assert "charmcraft.yaml" in listing and "src" in listing
-    assert not {".wof", ".git", ".venv"} & set(listing)
+    assert not {".wof", ".venv"} & set(listing)
+    # ...but as a fresh git repository with one commit, for build scriptlets
+    # that run git (alertmanager-k8s's `git describe`).
+    if shutil.which("git"):
+        assert ".git" in listing and listing[-1] == "commits=1"
     # ...so the workspace is untouched.
     assert not list(ws.glob("*.charm"))
 
@@ -158,8 +164,8 @@ def test_static_tier_pack_turned_off(tmp_path, fake_charmcraft):
     assert not log.exists()
 
 
-def test_scoring_code_version_is_3():
-    assert scoring_code_version("0.3.0") == "3+charmlint-0.3.0"
+def test_scoring_code_version_is_4():
+    assert scoring_code_version("0.3.0") == "4+charmlint-0.3.0"
 
 
 def test_pack_build_failed_is_in_the_vocabulary(config):

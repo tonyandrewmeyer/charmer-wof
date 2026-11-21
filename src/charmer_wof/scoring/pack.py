@@ -71,6 +71,37 @@ def charmcraft_version(runner: _proc.Runner = _proc.run, cwd: pathlib.Path | Non
     return (proc.stdout or "").strip() or "unknown"
 
 
+def _make_git_repo(project: pathlib.Path) -> None:
+    """Make the pack copy a git repository with one commit.
+
+    Some charms' ``override-build`` runs git (alertmanager-k8s writes ``git
+    describe --always`` into a version file), and the copy leaves the
+    workspace's ``.git`` out (prepared workspaces have none anyway), so the
+    build failed with "not a git repository" whatever the agent wrote. A
+    throwaway repository makes those scriptlets work; the version they record
+    is meaningless, which doesn't matter to whether the charm packs. Skipped
+    if git isn't installed.
+    """
+    git = shutil.which("git")
+    if git is None:
+        return
+    env = {
+        "GIT_AUTHOR_NAME": "wof",
+        "GIT_AUTHOR_EMAIL": "wof@invalid",
+        "GIT_COMMITTER_NAME": "wof",
+        "GIT_COMMITTER_EMAIL": "wof@invalid",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "PATH": "/usr/bin:/bin",
+    }
+    for args in (
+        ["init", "-q", "-b", "main"],
+        ["add", "-A"],
+        ["commit", "-q", "--no-gpg-sign", "-m", "wof pack"],
+    ):
+        subprocess.run([git, *args], cwd=project, env=env, capture_output=True, check=False)
+
+
 def run_pack(
     workspace: pathlib.Path,
     *,
@@ -85,6 +116,7 @@ def run_pack(
     with tempfile.TemporaryDirectory(prefix="wof-pack-") as tmp:
         project = pathlib.Path(tmp) / "charm"
         shutil.copytree(workspace, project, ignore=_IGNORE, symlinks=True)
+        _make_git_repo(project)
         started = time.monotonic()
         try:
             proc = runner(["charmcraft", "pack", "--verbosity", "brief"], project, timeout=timeout)
