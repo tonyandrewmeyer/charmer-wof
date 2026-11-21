@@ -55,14 +55,22 @@ def test_proxy_refuses_hosts_off_the_list_and_plain_http():
         }
 
 
-def test_env_points_every_client_at_the_proxy():
+def test_env_points_https_clients_at_the_proxy_and_leaves_plain_http_direct():
     with _egress.AgentNetwork() as net:
         env = net.env()
     proxy = f"http://127.0.0.1:{_egress.PROXY_PORT}"
-    for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY"):
-        assert env[k] == proxy
+    assert env["HTTPS_PROXY"] == env["https_proxy"] == proxy
+    assert not {"HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} & set(env)
     assert env["NODE_USE_ENV_PROXY"] == "1"
     assert "127.0.0.1" in env["NO_PROXY"]
+
+
+def test_isolated_drops_inherited_plain_http_proxies():
+    inherited = {"HTTP_PROXY": "http://corp:3128", "all_proxy": "socks5://x", "KEEP": "1"}
+    with _egress.isolated(["true"], inherited, []) as (_, env, _net):
+        assert env["KEEP"] == "1"
+        assert not {"HTTP_PROXY", "all_proxy"} & set(env)
+        assert env["HTTPS_PROXY"].startswith("http://127.0.0.1:")
 
 
 class _Echo(socketserver.BaseRequestHandler):

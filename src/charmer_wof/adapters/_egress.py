@@ -298,16 +298,21 @@ class AgentNetwork:
         return ",".join(f"{p}={self.socket_path(p)}" for p in ports)
 
     def env(self) -> dict[str, str]:
-        """The agent's proxy variables (any inherited ones are replaced)."""
+        """The agent's proxy variables.
+
+        HTTPS only. Everything on the allowlist is HTTPS, and a charm's own unit
+        tests often make plain-HTTP requests to made-up hosts (alertmanager's
+        to ``http://fqdn:9093``) that are meant to fail as connection errors;
+        through a proxy they would get a 403 response instead, and the agent
+        would see different test failures from the ones a developer sees. So
+        plain HTTP goes direct and fails as it would without a network.
+        ``isolated`` drops any inherited ``HTTP_PROXY``/``ALL_PROXY``.
+        """
         proxy = f"http://127.0.0.1:{PROXY_PORT}"
         no_proxy = "127.0.0.1,localhost,::1"
         return {
             "HTTPS_PROXY": proxy,
             "https_proxy": proxy,
-            "HTTP_PROXY": proxy,
-            "http_proxy": proxy,
-            "ALL_PROXY": proxy,
-            "all_proxy": proxy,
             "NO_PROXY": no_proxy,
             "no_proxy": no_proxy,
             # Node's fetch ignores the variables above unless asked (pi).
@@ -351,6 +356,9 @@ def isolation_wrapper(
     ]
 
 
+# Proxy variables the agent must not inherit (see ``AgentNetwork.env``).
+_PLAIN_PROXY_VARS = ("http_proxy", "all_proxy")
+
 # Exit codes of the wrapper that mean the agent never ran: the network
 # couldn't be set up, or a path couldn't be hidden (``_common.HIDE_FAILED``).
 ISOLATION_FAILED = (NET_FAILED, 97)
@@ -372,5 +380,6 @@ def isolated(
     import sys
 
     with AgentNetwork(forward=forward) as net:
-        full_env = {**env, **net.env()}
+        full_env = {k: v for k, v in env.items() if k.lower() not in _PLAIN_PROXY_VARS}
+        full_env.update(net.env())
         yield [*isolation_wrapper(net, hide, sys.executable), *cmd], full_env, net
