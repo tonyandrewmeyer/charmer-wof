@@ -164,8 +164,8 @@ def test_static_tier_pack_turned_off(tmp_path, fake_charmcraft):
     assert not log.exists()
 
 
-def test_scoring_code_version_is_4():
-    assert scoring_code_version("0.3.0") == "4+charmlint-0.3.0"
+def test_scoring_code_version_is_5():
+    assert scoring_code_version("0.3.0") == "5+charmlint-0.3.0"
 
 
 def test_pack_build_failed_is_in_the_vocabulary(config):

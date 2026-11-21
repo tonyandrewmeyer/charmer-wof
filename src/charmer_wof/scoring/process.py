@@ -57,7 +57,8 @@ def process_outcome(
     fetched = contamination.fetches(result.events)
     fetch_check = contamination.gold_fetch(task, fetched) if task is not None else None
     if fetch_check is not None and fetch_check.fetched:
-        tags.append("gold-fetched")
+        refused = fetch_check.all_refused(result.details)
+        tags.append("gold-fetch-refused" if refused else "gold-fetched")
     return ProcessOutcome(
         status="error" if result.exit_reason == "error" else "pass",
         reason=result.error if result.exit_reason == "error" else None,

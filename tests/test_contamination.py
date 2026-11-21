@@ -307,3 +307,74 @@ def test_process_without_a_task_keeps_fetches_but_checks_nothing(config):
 def test_tags_are_in_the_vocabulary(config):
     assert "gold-copied" in config.tags_for("static")
     assert "gold-fetched" in config.tags_for("process")
+
+
+def test_fetch_hosts():
+    assert c.fetch_hosts(
+        "curl -sSL https://github.com/canonical/x/archive/main.tar.gz; "
+        "git clone git@github.com:canonical/x.git; curl https://user:pw@codeload.github.com/a"
+    ) == ["codeload.github.com", "github.com"]
+    assert c.fetch_hosts("gh repo clone canonical/x") == []
+
+
+def _result_with(events, egress):
+    return AdapterResult(
+        exit_reason="completed",
+        cost_usd=0.0,
+        turns=1,
+        wall_seconds=1.0,
+        provider=None,
+        events=events,
+        details=egress,
+    )
+
+
+ALERTMANAGER_TARBALL = (
+    "cd /tmp && curl -sSL -o amk.tar.gz "
+    "https://github.com/canonical/alertmanager-k8s-operator/archive/refs/heads/main.tar.gz"
+)
+
+
+@pytest.mark.parametrize(
+    ("cmd", "egress", "tag"),
+    [
+        # Refused at the proxy, as in run 44877482270's pi record.
+        (
+            ALERTMANAGER_TARBALL,
+            {"egress_allowed": {"pypi.org": 1}, "egress_refused": {"github.com:443": 2}},
+            "gold-fetch-refused",
+        ),
+        # No egress record (a run without the agent network): can't tell.
+        (ALERTMANAGER_TARBALL, {}, "gold-fetched"),
+        # The host was allowed.
+        (
+            ALERTMANAGER_TARBALL,
+            {"egress_allowed": {"github.com": 1}, "egress_refused": {"github.com:443": 1}},
+            "gold-fetched",
+        ),
+        # The proxy never saw the host: it may have gone some other way.
+        (
+            ALERTMANAGER_TARBALL,
+            {"egress_allowed": {}, "egress_refused": {"codeload.github.com:443": 1}},
+            "gold-fetched",
+        ),
+        # A fetch that names no host.
+        (
+            "gh repo clone canonical/alertmanager-k8s-operator",
+            {"egress_allowed": {}, "egress_refused": {"github.com:443": 1}},
+            "gold-fetched",
+        ),
+    ],
+)
+def test_gold_fetch_refused_only_when_the_proxy_refused_every_host(config, cmd, egress, tag):
+    task = config.tasks["alertmanager-workload-tracing"]
+    out = process_outcome(
+        _result_with([_shell(cmd)], egress),
+        config.treatments["none"],
+        Caps(),
+        ["src/charm.py"],
+        task=task,
+    )
+    assert tag in out.failure_tags
+    other = ({"gold-fetched", "gold-fetch-refused"} - {tag}).pop()
+    assert other not in out.failure_tags

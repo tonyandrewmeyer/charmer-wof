@@ -39,6 +39,12 @@ alone (``wof gold-check`` re-runs them over a results file):
   noted (``details.gold_fetch.code_search``) but not tagged. Feature tasks
   only: a brief's ``gold_repo`` is a reference the agent may consult.
 
+- **Process, ``gold-fetch-refused``** in place of ``gold-fetched``: the same
+  attempt, when the agent's proxy (``adapters._egress``) refused every host
+  every such fetch names and allowed none of them, so nothing of the gold
+  reached the agent. It records that the agent went looking, and isn't a
+  reason to review the run (``GoldFetch.all_refused``).
+
 Neither tag excludes a record: the record is stored as usual, and a person
 confirms it and moves it to ``results/invalid/`` (HARNESS.md, "Gold-copy
 detection").
@@ -308,18 +314,54 @@ def gold_slug(gold_repo: str | None) -> str | None:
     return f"{m.group(1)}/{name}".lower()
 
 
+_HOST = re.compile(
+    r"(?:https?://|git@)(?:[^/@\s'\"]+@)?([A-Za-z0-9.-]+\.[A-Za-z]{2,})", re.IGNORECASE
+)
+
+
+def fetch_hosts(text: str) -> list[str]:
+    """The hosts a fetch names: URL hosts and ``git@host:`` remotes, lowercased."""
+    return sorted({h.lower().rstrip(".") for h in _HOST.findall(text)})
+
+
 @dataclasses.dataclass(frozen=True)
 class GoldFetch:
     applies: bool
     hits: list[str] = dataclasses.field(default_factory=list)
     code_search: bool = False
+    hit_hosts: list[list[str]] = dataclasses.field(default_factory=list)
+    """The hosts each hit names, in the same order as ``hits``."""
 
     @property
     def fetched(self) -> bool:
         return bool(self.hits)
 
+    def all_refused(self, egress: dict[str, Any] | None) -> bool:
+        """Whether the agent's proxy refused every host every hit names.
+
+        ``egress`` is the adapter's ``egress_allowed``/``egress_refused``
+        (``adapters._egress``). False, so the run keeps ``gold-fetched``,
+        when there's no egress record (a run without the agent network), when
+        a hit names no host (``gh repo clone owner/name``), or when any host a
+        hit names was allowed or never asked for (it may have gone some other
+        way).
+        """
+        if not self.hits or not egress or "egress_refused" not in egress:
+            return False
+        refused = {k.rsplit(":", 1)[0].lower() for k in egress.get("egress_refused") or {}}
+        allowed = {k.lower() for k in egress.get("egress_allowed") or {}}
+        for hosts in self.hit_hosts:
+            if not hosts or any(h in allowed or h not in refused for h in hosts):
+                return False
+        return True
+
     def details(self) -> dict[str, Any]:
-        return {"applies": self.applies, "hits": self.hits, "code_search": self.code_search}
+        return {
+            "applies": self.applies,
+            "hits": self.hits,
+            "hit_hosts": self.hit_hosts,
+            "code_search": self.code_search,
+        }
 
 
 def gold_fetch(task: Task, fetched: Sequence[dict[str, str]]) -> GoldFetch:
@@ -335,6 +377,7 @@ def gold_fetch(task: Task, fetched: Sequence[dict[str, str]]) -> GoldFetch:
         re.compile(rf"(?<![\w.-]){re.escape(slug)}(?![\w-])", re.IGNORECASE) if slug else None
     )
     hits: list[str] = []
+    hit_hosts: list[list[str]] = []
     code_search = False
     for f in fetched:
         text = urllib.parse.unquote_plus(f.get("input", ""))
@@ -349,4 +392,5 @@ def gold_fetch(task: Task, fetched: Sequence[dict[str, str]]) -> GoldFetch:
                     break
         if why:
             hits.append(f"{f.get('tool', '?')}: {why}: {f.get('input', '')[:200]}")
-    return GoldFetch(applies=True, hits=hits, code_search=code_search)
+            hit_hosts.append(fetch_hosts(text))
+    return GoldFetch(applies=True, hits=hits, code_search=code_search, hit_hosts=hit_hosts)

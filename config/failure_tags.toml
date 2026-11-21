@@ -163,3 +163,7 @@ description = "The agent's diff is a near-verbatim copy of the gold's own change
 [tags.gold-fetched]
 tiers = ["process"]
 description = "A tool call that fetched something named the gold repo or the gold SHA (a raw file, a clone, a code search for it)."
+
+[tags.gold-fetch-refused]
+tiers = ["process"]
+description = "A tool call tried to fetch something named the gold repo or the gold SHA, and the agent's egress proxy refused every host it named, so nothing of the gold reached the agent. Recorded, not a reason to review the run."

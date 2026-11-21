@@ -199,7 +199,7 @@ def test_score_in_another_process(agent_done, tmp_path, capsys):
     assert record.tiers.process.details["fetches"]
     assert record.tiers.static.status == "not_run"
     assert record.tiers.oracle.status == "not_run"
-    assert record.scoring.scoring_code_version.startswith("4+")
+    assert record.scoring.scoring_code_version.startswith("5+")
     assert "src/charm.py" in record.artefacts.agent_diff
 
 
