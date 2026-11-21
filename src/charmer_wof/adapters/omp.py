@@ -39,9 +39,8 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from ..config import Caps, Model
-from . import _common
+from . import _common, _egress
 from ._common import (
-    HIDE_FAILED,
     AdapterError,
     Fetcher,
     fetch_generation,
@@ -416,7 +415,6 @@ class OmpAdapter:
                 f"omp would load {', '.join(shadows)} instead of the workspace's CLAUDE.md"
             )
         hide = _common.resolve_hidden(workspace, hide)
-        wrapper = _common.hide_wrapper(hide)
         version = self.version()
         if version != self.pinned_version:
             raise OmpAdapterError(f"omp {version} is installed; the pin is {self.pinned_version}")
@@ -430,13 +428,18 @@ class OmpAdapter:
             overlay.write_text(OVERLAY)
             constraints = pathlib.Path(tmp) / _common.CONSTRAINTS_FILE
             run_env = self.environment(home, key, env, constraints)
-            cmd = [*wrapper, *self.command(workspace, prompt, model, caps, overlay)]
-            parsed, exit_reason, rc, stderr, wall = self._stream(
-                cmd, workspace, run_env, caps, events_path
-            )
+            with _egress.isolated(
+                self.command(workspace, prompt, model, caps, overlay),
+                run_env,
+                hide,
+            ) as (cmd, run_env, net):
+                parsed, exit_reason, rc, stderr, wall = self._stream(
+                    cmd, workspace, run_env, caps, events_path
+                )
+                egress = net.summary()
             stored_credentials = _count_credentials(home)
-        if rc == HIDE_FAILED and not parsed.turns and wrapper:
-            raise OmpAdapterError(f"could not hide {hide} from the agent: {stderr[-500:]}")
+        if rc in _egress.ISOLATION_FAILED and not parsed.turns:
+            raise OmpAdapterError(f"could not isolate the agent: {stderr[-500:]}")
         lookup = served_by(parsed.response_ids, key, self._fetch)
         exit_reason, error = outcome(parsed, exit_reason, rc, stderr, caps, wall)
         return AdapterResult(
@@ -467,6 +470,7 @@ class OmpAdapter:
                 "agent_charmlint": self.charmlint,
                 "hidden_paths": len([h for h in hide if h.exists()]),
                 "stored_credentials": stored_credentials,
+                **egress,
                 **lookup,
             },
         )

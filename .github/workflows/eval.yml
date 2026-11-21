@@ -337,12 +337,16 @@ jobs:
     timeout-minutes: 55
     permissions: {}
     steps:
-      # Block mode, no GitHub content hosts: no code search, no raw files, no
-      # clones (EGRESS.md, option 1). The allowlist is EGRESS.md's list as
-      # corrected by egress-audit.yml's runs: what each harness reached on
-      # its own (OpenCode's model catalogue and ripgrep download, omp's
-      # provider catalogues) is switched off in its adapter and install, not
-      # allowed here.
+      # The agent's own egress is enforced by the adapter, not here: it runs
+      # in a network namespace whose only way out is a proxy that allows the
+      # hosts in charmer_wof.adapters._egress.AGENT_EGRESS (no GitHub host).
+      # harden-runner can't do that on its own: in block mode it still
+      # allows GitHub's domains (github.com, *.github.com), and the first
+      # block-mode runs had agents cloning their gold from github.com. Block
+      # mode stays as a second layer for everything else in this job. What
+      # each harness reached on its own in egress-audit.yml's runs (OpenCode's
+      # model catalogue and ripgrep download, omp's provider catalogues) is
+      # switched off in its adapter and install, not allowed here.
       - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           # sudo stays enabled (the default): the sysctl step below needs it.

@@ -67,7 +67,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from ..config import Caps, Model
-from . import _common
+from . import _common, _egress
 from ._common import (
     HIDE_FAILED,
     AdapterError,
@@ -336,7 +336,6 @@ class PiAdapter:
                 f"context files above the workspace would reach pi: {', '.join(map(str, leaks))}"
             )
         hide = _common.resolve_hidden(workspace, hide)
-        wrapper = hide_wrapper(hide)
         version = self.version()
         if version != self.pinned_version:
             raise PiAdapterError(f"pi {version} is installed; the pin is {self.pinned_version}")
@@ -354,12 +353,17 @@ class PiAdapter:
             (agent_dir / "models.json").write_text(json.dumps(models_config, indent=2) + "\n")
             constraints = pathlib.Path(tmp) / _common.CONSTRAINTS_FILE
             run_env = self.environment(workspace, agent_dir, key, env, constraints)
-            cmd = [*wrapper, *self.command(workspace, prompt, model)]
-            parsed, exit_reason, rc, stderr, wall = self._stream(
-                cmd, workspace, run_env, caps, events_path
-            )
-        if rc == HIDE_FAILED and not parsed.turns and wrapper:
-            raise PiAdapterError(f"could not hide {hide} from the agent: {stderr[-500:]}")
+            with _egress.isolated(self.command(workspace, prompt, model), run_env, hide) as (
+                cmd,
+                run_env,
+                net,
+            ):
+                parsed, exit_reason, rc, stderr, wall = self._stream(
+                    cmd, workspace, run_env, caps, events_path
+                )
+                egress = net.summary()
+        if rc in _egress.ISOLATION_FAILED and not parsed.turns:
+            raise PiAdapterError(f"could not isolate the agent: {stderr[-500:]}")
         lookup = served_by(parsed.response_ids, key, self._fetch)
         error = None
         failed = rc != 0 or parsed.errors or not parsed.settled or parsed.aborted
@@ -392,6 +396,7 @@ class PiAdapter:
                 "skills": [str(d.relative_to(workspace)) for d in skill_dirs(workspace)],
                 "agent_charmlint": self.charmlint,
                 "hidden_paths": len([h for h in hide if h.exists()]),
+                **egress,
                 **lookup,
             },
         )

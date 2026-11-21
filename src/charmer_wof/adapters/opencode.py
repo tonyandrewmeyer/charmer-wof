@@ -44,7 +44,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from ..config import Caps, Model
-from . import _common
+from . import _common, _egress
 from ._common import (  # noqa: F401
     HIDE_FAILED,
     MODELS_URL,
@@ -459,7 +459,6 @@ class OpenCodeAdapter:
                 f"OpenCode would also read {', '.join(extras)} from the workspace"
             )
         hide = _common.resolve_hidden(workspace, hide)
-        wrapper = _common.hide_wrapper(hide)
         version = self.version()
         if version != self.pinned_version:
             raise OpenCodeAdapterError(
@@ -480,15 +479,24 @@ class OpenCodeAdapter:
             run_tmp = pathlib.Path(tmp) / "tmp"
             run_tmp.mkdir()
             run_env = self.environment(home, key, env, constraints, run_tmp)
-            cmd = [*wrapper, *self.command(selector, prompt, f"wof {workspace.name}")]
-            parsed, exit_reason, rc, stderr, wall = self._stream(
-                cmd, workspace, run_env, caps, events_path
-            )
+            # The relay listens on the host's loopback; the namespace gets the
+            # same port, forwarded, so the config's URL works inside it.
+            relay_port = int(relay.url.rsplit(":", 1)[1])
+            with _egress.isolated(
+                self.command(selector, prompt, f"wof {workspace.name}"),
+                run_env,
+                hide,
+                forward=(relay_port,),
+            ) as (cmd, run_env, net):
+                parsed, exit_reason, rc, stderr, wall = self._stream(
+                    cmd, workspace, run_env, caps, events_path
+                )
+                egress = net.summary()
             stored_credentials = count_credentials(home)
             relay_summary = relay.summary()
             generation_ids = list(relay.generation_ids)
-        if rc == HIDE_FAILED and not parsed.turns and wrapper:
-            raise OpenCodeAdapterError(f"could not hide {hide} from the agent: {stderr[-500:]}")
+        if rc in _egress.ISOLATION_FAILED and not parsed.turns:
+            raise OpenCodeAdapterError(f"could not isolate the agent: {stderr[-500:]}")
         lookup = served_by(generation_ids, key, self._fetch)
         exit_reason, error = outcome(parsed, exit_reason, rc, stderr)
         return AdapterResult(
@@ -520,6 +528,7 @@ class OpenCodeAdapter:
                 "stored_credentials": stored_credentials,
                 "stderr_tail": stderr[-500:] if rc else "",
                 **relay_summary,
+                **egress,
                 **lookup,
             },
         )
