@@ -19,12 +19,13 @@ import pathlib
 import subprocess
 import tarfile
 import tempfile
+import uuid
 
 from . import store, workspace
 from .adapters.base import AdapterResult, HarnessAdapter, get_adapter
 from .config import Config, Task, Treatment
 from .planner import PlannedCell
-from .record import build_record, stub_tiers
+from .record import build_record, scoring_ref, stub_tiers
 from .schema import (
     JudgeOutcome,
     OracleOutcome,
@@ -33,6 +34,7 @@ from .schema import (
     RunRecord,
     TierOutcome,
     Tiers,
+    series_key,
 )
 from .scoring import _proc, acceptance, contamination, oracle, process, static
 from .workspace import build_prompt
@@ -388,6 +390,135 @@ def with_acceptance_check(
             "details": {**outcome.details, "checks": checks},
         }
     )
+
+
+def _rebuilt_trees(
+    config: Config, record: RunRecord, gold: pathlib.Path, dest: pathlib.Path
+) -> tuple[pathlib.Path, pathlib.Path]:
+    """The record's base and the agent's tree, rebuilt from the gold and the stored diff.
+
+    The diff leaves out ``lib/`` and ``uv.lock`` (``workspace.DIFF_EXCLUDES``), so
+    the agent's tree is only as good as that: callers compare what they compute
+    on it with what the record holds.
+    """
+    task = config.tasks[record.task.id]
+    ws = workspace.prepare(task, config.treatments[record.treatment.id], gold, dest / "ws")
+    base = dest / "base"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "--detach", str(base), ws.base_sha],
+        cwd=ws.path,
+        check=True,
+        capture_output=True,
+    )
+    patch = dest / "agent.diff"
+    patch.write_text(record.artefacts.agent_diff or "")
+    if (record.artefacts.agent_diff or "").strip():
+        subprocess.run(
+            ["git", "apply", "--whitespace=nowarn", str(patch)],
+            cwd=ws.path,
+            check=True,
+            capture_output=True,
+        )
+    return base, ws.path
+
+
+def rescore(
+    config: Config,
+    record: RunRecord,
+    *,
+    gold: pathlib.Path | None = None,
+    gold_lint: dict | None = None,
+    run_id: str | None = None,
+) -> RunRecord:
+    """A stored record scored again with today's scoring code, without its workspace.
+
+    What can be recomputed from the record (and, for charmlint, the gold) is:
+    the gold-copy check, the acceptance-tests check, and the charmlint check
+    against the gold (base and agent trees rebuilt from ``gold`` and the stored
+    diff, refused if the rebuilt agent tree doesn't give the recorded total).
+    Everything else (ruff, pack, the declared checks, the oracle, process) is
+    kept as recorded: none of it changed in scoring code 6, except that the
+    oracle's failure output can't be recovered (there was none for a passing
+    oracle). The new record is in the current series, keeps ``created_at``,
+    gets a new ``run_id`` (so ``wof store`` doesn't skip it as stored), and
+    says what it came from in ``tiers.static.details.rescored_from``.
+    """
+    task = config.tasks[record.task.id]
+    treatment = config.treatments[record.treatment.id]
+    old = record.tiers.static
+    if old.status == "not_run":
+        raise RunError(f"{record.run_id}: the static tier didn't run; nothing to re-score")
+    checks = {k: dict(v) for k, v in old.details.get("checks", {}).items()}
+    metrics = dict(old.metrics)
+    tags = [t for t in old.failure_tags if t not in ("gold-copied", "lint-regression")]
+    cl = checks.get("charmlint")
+    counted = metrics.get("charmlint_delta")
+    if cl is not None and cl.get("status") != "error" and task.kind == "feature":
+        if gold is None or gold_lint is None:
+            cl["gold_baseline"] = {"status": "not_available"}
+            cl["reason"] = "re-scored without the gold: findings the gold also has not excused"
+            metrics["charmlint_excused"] = None
+        else:
+            charmlint = config.scoring.static.charmlint
+            with tempfile.TemporaryDirectory() as tmp:
+                base, agent = _rebuilt_trees(config, record, gold, pathlib.Path(tmp))
+                base_p = static.charmlint_counts(base, charmlint)
+                agent_p = static.charmlint_counts(agent, charmlint)
+            if "error" in base_p or "error" in agent_p:
+                raise RunError(
+                    f"charmlint did not run: {base_p.get('error') or agent_p.get('error')}"
+                )
+            if agent_p["total"] != cl.get("total"):
+                raise RunError(
+                    f"{record.run_id}: the rebuilt tree has {agent_p['total']} charmlint "
+                    f"findings, the record {cl.get('total')}: not re-scoring charmlint"
+                )
+            excused, still_new = static.excused_by_gold(agent_p, base_p, gold_lint)
+            counted = agent_p["total"] - base_p["total"] - len(excused)
+            cl["gold_baseline"] = static._gold_baseline(gold_lint)
+            cl["excused"] = [static._key_json(k) for k in excused[: static.FINDINGS_KEPT]]
+            cl["new"] = [static._key_json(k) for k in still_new[: static.FINDINGS_KEPT]]
+            cl["status"] = "fail" if counted > 0 else "pass"
+            metrics["charmlint_excused"] = len(excused)
+    if (
+        (metrics.get("ruff_delta") or 0) > 0
+        or (metrics.get("ruff_format_delta") or 0) > 0
+        or (counted or 0) > 0
+    ):
+        tags.append("lint-regression")
+    statuses = [c["status"] for c in checks.values()]
+    status = "fail" if "fail" in statuses else ("pass" if "pass" in statuses else "error")
+    details = {**old.details, "checks": checks}
+    details.pop("gold_copy", None)
+    outcome = old.model_copy(
+        update={"status": status, "failure_tags": tags, "metrics": metrics, "details": details}
+    )
+    outcome = with_gold_copy(
+        outcome, task, record.artefacts.agent_diff, treatment, record.treatment.artefacts
+    )
+    outcome = with_acceptance_check(
+        outcome,
+        task,
+        treatment,
+        diff=record.artefacts.agent_diff,
+        recorded=record.treatment.artefacts,
+    )
+    outcome.details["rescored_from"] = {
+        "run_id": record.run_id,
+        "series": record.series,
+        "scoring_code_version": record.scoring.scoring_code_version,
+    }
+    scoring = scoring_ref(config)
+    data = record.model_dump(mode="python")
+    data.update(
+        run_id=run_id
+        or uuid.uuid5(uuid.NAMESPACE_URL, f"{record.run_id}/{series_key(scoring)}").hex,
+        series=series_key(scoring),
+        scoring=scoring.model_dump(mode="python"),
+        schema_version=2,
+    )
+    data["tiers"]["static"] = outcome.model_dump(mode="python")
+    return RunRecord.model_validate(data)
 
 
 class RunError(RuntimeError):

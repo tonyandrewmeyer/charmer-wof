@@ -384,6 +384,50 @@ def cmd_gold_lint(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rescore(args: argparse.Namespace) -> int:
+    """Re-score stored records with today's scoring code; writes new records, never stores."""
+    config = _config(args)
+    wanted = set(_split(args.run_id) or [])
+    golds = {}
+    for spec in args.gold or []:
+        task, _, path = spec.partition("=")
+        golds[task] = pathlib.Path(path).resolve()
+    written = 0
+    for record in store.iter_records(args.results):
+        if wanted and record.run_id not in wanted:
+            continue
+        gold = golds.get(record.task.id)
+        try:
+            gold_lint = (
+                ladder.gold_lint_profile(config, config.tasks[record.task.id], gold)
+                if gold is not None
+                else None
+            )
+            new = ladder.rescore(config, record, gold=gold, gold_lint=gold_lint)
+        except (ladder.RunError, static.GoldLintError, subprocess.CalledProcessError) as e:
+            print(f"{record.run_id} ({record.cell.id}): not re-scored: {e}", file=sys.stderr)
+            continue
+        store.append(args.out, new, allowed_tags=ladder.allowed_tags(config))
+        written += 1
+        old, now = record.tiers.static, new.tiers.static
+        print(
+            json.dumps(
+                {
+                    "from": record.run_id,
+                    "run_id": new.run_id,
+                    "cell": record.cell.id,
+                    "series": f"{record.series} -> {new.series}",
+                    "static": [
+                        f"{old.status} {old.failure_tags}",
+                        f"{now.status} {now.failure_tags}",
+                    ],
+                }
+            )
+        )
+    print(f"# {written} re-scored record(s) in {args.out}", file=sys.stderr)
+    return 0
+
+
 def cmd_store(args: argparse.Namespace) -> int:
     """Append scored records to the store: validated, tag-checked, never twice, never dry."""
     config = _config(args)
@@ -515,6 +559,24 @@ def parser() -> argparse.ArgumentParser:
     )
     s.add_argument("results", type=pathlib.Path, nargs="+")
     s.set_defaults(func=cmd_gold_check)
+
+    s = sub.add_parser(
+        "rescore",
+        help="re-score stored records with today's scoring code, from the record (and the "
+        "gold, for charmlint), into a new file; nothing is stored",
+    )
+    s.add_argument("results", type=pathlib.Path)
+    s.add_argument("--out", type=pathlib.Path, required=True)
+    s.add_argument(
+        "--run-id", action="append", help="only these records (repeatable, or comma-separated)"
+    )
+    s.add_argument(
+        "--gold",
+        action="append",
+        metavar="TASK=CHECKOUT",
+        help="a gold checkout for a task, so charmlint can be baselined against it",
+    )
+    s.set_defaults(func=cmd_rescore)
 
     s = sub.add_parser(
         "fetch-gold",

@@ -11,6 +11,7 @@ from conftest import git
 
 from charmer_wof import cli, gold, ladder, planner, store, workspace
 from charmer_wof.adapters.base import AdapterResult, ToolEvent
+from charmer_wof.config import PACKAGE_ROOT
 
 # --- plan --matrix-json -------------------------------------------------------
 
@@ -252,7 +253,7 @@ def test_score_in_another_process(agent_done, tmp_path, capsys):
     assert record.tiers.process.details["fetches"]
     assert record.tiers.static.status == "not_run"
     assert record.tiers.oracle.status == "not_run"
-    assert record.scoring.scoring_code_version.startswith("5+")
+    assert record.scoring.scoring_code_version.startswith("6+")
     assert "src/charm.py" in record.artefacts.agent_diff
 
 
@@ -370,3 +371,34 @@ def test_gold_lint_lints_the_gold_tree(config, tmp_path, monkeypatch):
     assert seen == [["charmcraft.yaml"]]  # the subdirectory, not the repo root
     assert profile == {"task": task.id, "gold_sha": sha, "charmlint": "0.3.0", "total": 1,
                        "findings": [["R", "charmcraft.yaml", "m"]]}  # fmt: skip
+
+
+# --- wof rescore (2026-11-26) -----------------------------------------------------
+
+
+def test_rescore_from_the_record_alone(config, tmp_path, capsys):
+    from charmer_wof.record import current_series
+
+    invalid = (
+        PACKAGE_ROOT / "results" / "invalid" / "2026-11-17-haproxy-salt-copied-upstream.jsonl"
+    )
+    (old,) = store.iter_records(invalid)
+    out = tmp_path / "rescored.jsonl"
+    assert cli.main(["rescore", str(invalid), "--out", str(out)]) == 0
+    (new,) = store.iter_records(out)
+    assert new.series == current_series(config) != old.series
+    assert new.run_id != old.run_id and new.created_at == old.created_at
+    assert new.artefacts == old.artefacts and new.tiers.oracle == old.tiers.oracle
+    static = new.tiers.static
+    assert static.details["rescored_from"]["run_id"] == old.run_id
+    assert "gold-copied" in static.failure_tags  # a real copy stays a copy
+    # Without the gold, charmlint can't be baselined, and the record says so.
+    assert static.details["checks"]["charmlint"]["gold_baseline"] == {"status": "not_available"}
+    # The same record re-scored again gets the same id: re-running is idempotent.
+    again = tmp_path / "again.jsonl"
+    cli.main(["rescore", str(invalid), "--out", str(again)])
+    assert next(store.iter_records(again)).run_id == new.run_id
+    # And the store takes it like any other record.
+    results = tmp_path / "results.jsonl"
+    assert cli.main(["store", str(out), "--results", str(results)]) == 0
+    assert '"added": 1' in capsys.readouterr().out
