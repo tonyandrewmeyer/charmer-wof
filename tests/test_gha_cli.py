@@ -316,3 +316,57 @@ def test_fetch_libs_runs_charmcraft(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
     workspace.fetch_libs(tmp_path)
     assert (tmp_path / "lib/charms/x/y.py").exists()
+
+
+# --- the gold's charmlint profile (2026-11-26) ----------------------------------
+
+
+def test_score_refuses_a_feature_task_without_the_gold_lint(config, tmp_path):
+    planned = planner.resolve(config, "haproxy-get-configuration/pi/glm-5-3/none/0")
+    ws = workspace.Workspace(tmp_path, "0" * 40, "prompt")
+    with pytest.raises(ladder.RunError, match="--no-gold-lint"):
+        ladder.score(
+            config,
+            planned,
+            ws,
+            AdapterResult("completed", None, None, 0.0, None, []),
+        )
+
+
+def test_load_gold_lint_checks_task_sha_and_pin(config, tmp_path):
+    task = config.tasks["haproxy-get-configuration"]
+    good = {"task": task.id, "gold_sha": task.gold_sha, "charmlint": "0.3.0", "findings": []}
+    path = tmp_path / "g.json"
+    path.write_text(json.dumps(good))
+    assert ladder.load_gold_lint(path, task, "0.3.0") == good
+    path.write_text(json.dumps({**good, "task": "haproxy-client-ip-hash-salt"}))
+    with pytest.raises(ladder.RunError, match="not the gold charmlint profile"):
+        ladder.load_gold_lint(path, task, "0.3.0")
+    with pytest.raises(ladder.RunError):
+        path.write_text(json.dumps(good))
+        ladder.load_gold_lint(path, task, "0.4.0")
+
+
+def test_gold_lint_lints_the_gold_tree(config, tmp_path, monkeypatch):
+    from charmer_wof.scoring import static
+
+    gold = tmp_path / "gold"
+    gold.mkdir()
+    git(gold, "init", "-q")
+    (gold / "haproxy-operator").mkdir()
+    (gold / "haproxy-operator" / "charmcraft.yaml").write_text("name: haproxy\n")
+    git(gold, "add", "-A")
+    git(gold, "commit", "-q", "-m", "gold")
+    sha = git(gold, "rev-parse", "HEAD")
+    task = config.tasks["haproxy-get-configuration"].model_copy(update={"gold_sha": sha})
+    seen = []
+
+    def fake_counts(tree, version, runner=None):
+        seen.append(sorted(p.name for p in tree.iterdir()))
+        return {"total": 1, "findings": [("R", "charmcraft.yaml", "m")]}
+
+    monkeypatch.setattr(static, "charmlint_counts", fake_counts)
+    profile = ladder.gold_lint_profile(config, task, gold)
+    assert seen == [["charmcraft.yaml"]]  # the subdirectory, not the repo root
+    assert profile == {"task": task.id, "gold_sha": sha, "charmlint": "0.3.0", "total": 1,
+                       "findings": [["R", "charmcraft.yaml", "m"]]}  # fmt: skip

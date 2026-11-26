@@ -13,9 +13,11 @@ the adapter's result in ``.wof/agent-result.json``), then ``wof score``
 
 from __future__ import annotations
 
+import io
 import json
 import pathlib
 import subprocess
+import tarfile
 import tempfile
 
 from . import store, workspace
@@ -71,6 +73,44 @@ def baseline_profile(
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(base)], cwd=ws, capture_output=True
             )
+
+
+def gold_lint_profile(config: Config, task: Task, gold: pathlib.Path) -> dict:
+    """charmlint on the gold's own tree (``static.gold_lint_profile``), from a checkout.
+
+    The tree is what ``workspace.prepare`` starts from: ``git archive`` of the
+    gold SHA (and subdirectory), plus ``charmcraft fetch-libs`` for a task that
+    needs it.
+    """
+    if task.kind != "feature" or task.gold_sha is None:
+        raise RunError(f"task {task.id!r} has no gold to lint")
+    tree = f"{task.gold_sha}:{task.gold_subdir}" if task.gold_subdir else task.gold_sha
+    with tempfile.TemporaryDirectory() as tmp:
+        dest = pathlib.Path(tmp) / "gold"
+        dest.mkdir()
+        tar = subprocess.run(
+            ["git", "archive", "--format=tar", tree], cwd=gold, capture_output=True, check=True
+        ).stdout
+        with tarfile.open(fileobj=io.BytesIO(tar)) as tf:
+            tf.extractall(dest, filter="data")
+        if task.fetch_libs:
+            workspace.fetch_libs(dest)
+        return static.gold_lint_profile(
+            dest,
+            config.scoring.static.charmlint,
+            task_id=task.id,
+            gold_sha=task.gold_sha,
+        )
+
+
+def load_gold_lint(path: pathlib.Path, task: Task, charmlint: str) -> dict:
+    """A profile ``wof gold-lint`` wrote, checked against the task and the pin."""
+    data = json.loads(path.read_text())
+    want = {"task": task.id, "gold_sha": task.gold_sha, "charmlint": charmlint}
+    got = {k: data.get(k) for k in want}
+    if got != want or not isinstance(data.get("findings"), list):
+        raise RunError(f"{path} is not the gold charmlint profile for {want}: {got}")
+    return data
 
 
 def _toplevel(path: pathlib.Path) -> pathlib.Path:
@@ -160,17 +200,31 @@ def score(
     result: AdapterResult,
     *,
     tiers: tuple[str, ...] = SCORABLE_TIERS,
+    gold_lint: dict | None = None,
+    without_gold_lint: bool = False,
 ) -> RunRecord:
     """Snapshot what the agent left and score it; returns the record (not stored).
 
     Tiers not in ``tiers`` are ``not_run``; live (phase 3, still to come) and
-    judge (phase 4) always are.
+    judge (phase 4) always are. A feature task's static tier needs the gold's
+    charmlint profile (``gold_lint``); scoring one without it has to be asked
+    for (``without_gold_lint``), and the record says so.
     """
     unknown = set(tiers) - set(SCORABLE_TIERS)
     if unknown:
         raise RunError(f"unknown tiers {sorted(unknown)}; choose from {list(SCORABLE_TIERS)}")
     cell = planned.cell
     task = config.tasks[cell.task]
+    if (
+        "static" in tiers
+        and task.kind == "feature"
+        and gold_lint is None
+        and not without_gold_lint
+    ):
+        raise RunError(
+            f"{task.id} is a feature task: its static tier needs the gold's charmlint "
+            "profile (wof gold-lint, then --gold-lint), or --no-gold-lint to score without one"
+        )
     treatment = config.treatments[cell.treatment]
     caps = config.plan.caps
     charmlint = config.scoring.static.charmlint
@@ -193,6 +247,7 @@ def score(
                 python=task.python,
                 changed=changed,
                 pack="pack" in tiers,
+                gold_lint=gold_lint,
             ),
             task,
             diff,
@@ -247,11 +302,13 @@ def run_cell(
     harness = config.harnesses[cell.harness]
     if not harness.pinned:
         raise RunError(f"harness {harness.name!r} is unpinned; real runs need a pinned version")
-    ws = workspace.prepare(config.tasks[cell.task], config.treatments[cell.treatment], gold, dest)
+    task = config.tasks[cell.task]
+    ws = workspace.prepare(task, config.treatments[cell.treatment], gold, dest)
+    gold_lint = gold_lint_profile(config, task, gold) if task.kind == "feature" and gold else None
     result = run_agent(
         config, planned, ws, gold=gold, adapter=adapter, openrouter_key_env=openrouter_key_env
     )
-    record = score(config, planned, ws, result)
+    record = score(config, planned, ws, result, gold_lint=gold_lint)
     return store.append(results, record, allowed_tags=allowed_tags(config))
 
 

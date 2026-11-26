@@ -1,11 +1,12 @@
 """Command line: ``wof plan|run|prepare|static|oracle|schema|series|show|gold-check``,
-and the GHA steps ``wof fetch-gold|agent|score|store``."""
+and the GHA steps ``wof fetch-gold|gold-lint|agent|score|store``."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 
@@ -188,8 +189,14 @@ def cmd_static(args: argparse.Namespace) -> int:
         if args.no_baseline or task.kind == "new-charm"
         else ladder.baseline_profile(ws, charmlint, task.python, task.static_checks.ruff_exclude)
     )
+    gold_lint = ladder.load_gold_lint(args.gold_lint, task, charmlint) if args.gold_lint else None
     outcome = static.run_static(
-        ws, task.static_checks, charmlint=charmlint, baseline=baseline, python=task.python
+        ws,
+        task.static_checks,
+        charmlint=charmlint,
+        baseline=baseline,
+        python=task.python,
+        gold_lint=gold_lint,
     )
     print(outcome.model_dump_json(indent=2))
     return 0
@@ -325,10 +332,25 @@ def cmd_score(args: argparse.Namespace) -> int:
     planned = planner.resolve(config, args.cell)
     tiers = tuple(_split([args.tiers]) or ())
     try:
+        gold_lint = (
+            ladder.load_gold_lint(
+                args.gold_lint, config.tasks[planned.cell.task], config.scoring.static.charmlint
+            )
+            if args.gold_lint
+            else None
+        )
         ws = workspace.load(args.workspace.resolve())
         result = ladder.load_agent_result(ws, planned.id)
-        record = ladder.score(config, planned, ws, result, tiers=tiers)
-    except (ladder.RunError, workspace.WorkspaceError) as e:
+        record = ladder.score(
+            config,
+            planned,
+            ws,
+            result,
+            tiers=tiers,
+            gold_lint=gold_lint,
+            without_gold_lint=args.no_gold_lint,
+        )
+    except (ladder.RunError, workspace.WorkspaceError, OSError, ValueError) as e:
         print(f"score refused: {e}", file=sys.stderr)
         return 2
     store.append(args.results, record, allowed_tags=ladder.allowed_tags(config))
@@ -345,6 +367,20 @@ def cmd_score(args: argparse.Namespace) -> int:
             }
         )
     )
+    return 0
+
+
+def cmd_gold_lint(args: argparse.Namespace) -> int:
+    config = _config(args)
+    task = config.tasks[args.task]
+    try:
+        profile = ladder.gold_lint_profile(config, task, args.gold.resolve())
+    except (ladder.RunError, static.GoldLintError, subprocess.CalledProcessError) as e:
+        print(f"gold-lint failed: {e}", file=sys.stderr)
+        return 1
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(profile, indent=1) + "\n")
+    print(json.dumps({"task": task.id, "total": profile["total"], "out": str(args.out)}))
     return 0
 
 
@@ -448,6 +484,12 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("workspace", type=pathlib.Path)
     s.add_argument("--task", required=True)
     s.add_argument("--no-baseline", action="store_true", help="counts only, no deltas")
+    s.add_argument(
+        "--gold-lint",
+        type=pathlib.Path,
+        help="the gold's charmlint profile (wof gold-lint); without it the charmlint check "
+        "records gold_baseline: not_available",
+    )
     s.set_defaults(func=cmd_static)
 
     s = sub.add_parser("oracle", help="run the hidden-oracle tier on a workspace")
@@ -502,7 +544,29 @@ def parser() -> argparse.ArgumentParser:
         "live and judge are always not_run",
     )
     s.add_argument("--results", type=pathlib.Path, required=True)
+    g = s.add_mutually_exclusive_group()
+    g.add_argument(
+        "--gold-lint",
+        type=pathlib.Path,
+        help="the gold's charmlint profile (wof gold-lint); a feature task needs it or "
+        "--no-gold-lint",
+    )
+    g.add_argument(
+        "--no-gold-lint",
+        action="store_true",
+        help="score a feature task without the gold's charmlint profile (recorded as "
+        "gold_baseline: not_available)",
+    )
     s.set_defaults(func=cmd_score)
+
+    s = sub.add_parser(
+        "gold-lint",
+        help="charmlint on a task's gold tree, for `wof score --gold-lint` (GHA prep job)",
+    )
+    s.add_argument("task")
+    s.add_argument("--gold", type=pathlib.Path, required=True, help="checkout of the gold repo")
+    s.add_argument("--out", type=pathlib.Path, required=True)
+    s.set_defaults(func=cmd_gold_lint)
 
     s = sub.add_parser(
         "store", help="append scored records to a store, skipping ones already in it (GHA)"

@@ -11,7 +11,18 @@ Sub-checks, each ``pass``/``fail``/``error``/``not_run``:
 - ``ruff``: ``ruff check`` and ``ruff format --check`` under the charm's own
   environment and config (``uv run``), as §9 did. Fails if either count rose
   above the base.
-- ``charmlint``: findings at the pinned version; fails if the total rose.
+- ``charmlint``: findings at the pinned version; fails if the total rose,
+  not counting new findings the gold also has (since 2026-11-26, decided
+  2026-11-25). A feature task's gold is linted where it's available (the prep
+  job on GHA, ``wof gold-lint``) and its profile passed in as ``gold_lint``.
+  Findings are matched by ``finding_key``: rule, file and message, with the
+  charm's own directory taken out, but not the line number, which moves with
+  every edit. The message carries what a finding is about (the action, the
+  endpoint, the library), so ``ACTIONS-002`` on the task's action matches the
+  gold's and on any other action doesn't. Counting is by multiset: a new
+  finding is excused only while the gold has more of that key than the base.
+  The details list what was excused; ``gold_baseline.status`` says whether a
+  gold profile was used, and is never silently absent for a feature task.
 - ``pack``: ``charmcraft pack`` on a copy of the workspace (``scoring.pack``),
   since scoring-code version 3. Needs charmcraft and a build backend (LXD on
   GHA); ``not_run`` where charmcraft isn't installed or pack is turned off,
@@ -29,6 +40,7 @@ them could run.
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import json
 import pathlib
@@ -181,6 +193,31 @@ def ruff_counts(
     return {"check": len(findings), "format": unformatted, "codes": codes}
 
 
+FINDINGS_KEPT = 50
+MESSAGE_KEPT = 200
+
+
+def finding_key(diag: dict[str, Any], charm_dir: str | None) -> tuple[str, str, str]:
+    """``(rule, path, message)`` for matching one charmlint finding across trees.
+
+    The charm's directory is taken out of the path and the message, so the
+    same finding in the workspace, the base's worktree and the gold's copy has
+    the same key. The line number isn't part of it: it moves with any edit.
+    """
+    prefix = (charm_dir or "").rstrip("/") + "/" if charm_dir else None
+    path = str(diag.get("path") or "")
+    message = str(diag.get("message") or "")
+    if prefix:
+        path = path.removeprefix(prefix)
+        message = message.replace(prefix, "")
+    return (str(diag.get("rule_id") or ""), path, message)
+
+
+def _key_json(key: tuple[str, str, str]) -> dict[str, str]:
+    rule, path, message = key
+    return {"rule": rule, "path": path, "message": message[:MESSAGE_KEPT]}
+
+
 def charmlint_counts(
     workspace: pathlib.Path, version: str, runner: _proc.Runner = _proc.run
 ) -> dict[str, Any]:
@@ -193,13 +230,38 @@ def charmlint_counts(
         data = json.loads(proc.stdout)
     except (OSError, ValueError) as e:
         return {"error": f"charmlint did not run: {e}"}
-    rules = sorted(d.get("rule_id") for d in data.get("diagnostics", []) if d.get("rule_id"))
+    diags = [d for d in data.get("diagnostics", []) if isinstance(d, dict)]
+    rules = sorted(d.get("rule_id") for d in diags if d.get("rule_id"))
     return {
         "total": data.get("total"),
         "errors": data.get("errors"),
         "warnings": data.get("warnings"),
         "rules": rules,
+        "findings": sorted(finding_key(d, data.get("charm_dir")) for d in diags),
     }
+
+
+def _keys(profile: dict[str, Any] | None) -> collections.Counter[tuple[str, str, str]] | None:
+    if not profile or profile.get("findings") is None:
+        return None
+    return collections.Counter(tuple(k) for k in profile["findings"])
+
+
+def excused_by_gold(
+    now: dict[str, Any], base: dict[str, Any] | None, gold: dict[str, Any] | None
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]] | None:
+    """(excused, still new): the agent's new findings the gold has too, and the rest.
+
+    New means in the result and not in the base (multiset, by ``finding_key``);
+    a new finding is excused while the gold has more of its key than the base
+    does. None when any of the three has no findings to compare.
+    """
+    a, b, g = _keys(now), _keys(base), _keys(gold)
+    if a is None or b is None or g is None:
+        return None
+    new = a - b
+    excused = new & (g - b)
+    return sorted(excused.elements()), sorted((new - excused).elements())
 
 
 def lint_profile(
@@ -233,7 +295,11 @@ def run_static(
     which=shutil.which,
     changed: list[str] | None = None,
     pack: bool = True,
+    gold_lint: dict[str, Any] | None = None,
 ) -> TierOutcome:
+    """``gold_lint`` is the gold's charmlint profile (``gold_lint_profile``), for
+    a feature task where the gold could be linted; with a ``baseline`` and
+    without it, the charmlint check records ``gold_baseline: not_available``."""
     results: dict[str, dict[str, Any]] = {}
     tags: list[str] = []
 
@@ -262,17 +328,40 @@ def run_static(
             codes=ruff["codes"],
         )
     cl = lint["charmlint"]
+    cl_excused: int | None = None
     if "error" in cl:
         results["charmlint"] = _check("error", cl["error"])
-        cl_delta = None
+        cl_delta = cl_counted = None
     else:
         cl_delta = _delta(cl["total"], base.get("charmlint", {}).get("total"))
+        cl_counted = cl_delta
+        extra: dict[str, Any] = {}
+        reason = None if baseline else "no baseline: counts only"
+        if baseline:
+            gold_base = _gold_baseline(gold_lint)
+            extra["gold_baseline"] = gold_base
+            # Without a gold profile, every new finding is still new.
+            split = excused_by_gold(cl, base.get("charmlint"), gold_lint or {"findings": []})
+            if split is not None:
+                excused, still_new = split
+                extra["new"] = [_key_json(k) for k in still_new[:FINDINGS_KEPT]]
+            if gold_lint is None:
+                reason = "no gold baseline: findings the gold also has are not excused"
+            elif split is None or _keys(gold_lint) is None:
+                gold_base["status"] = "not_comparable"
+                reason = "the gold or base profile has no findings list: nothing excused"
+            else:
+                cl_excused = len(excused)
+                if cl_delta is not None:
+                    cl_counted = cl_delta - cl_excused
+                extra["excused"] = [_key_json(k) for k in excused[:FINDINGS_KEPT]]
         results["charmlint"] = _check(
-            "fail" if (cl_delta or 0) > 0 else "pass",
-            None if baseline else "no baseline: counts only",
+            "fail" if (cl_counted or 0) > 0 else "pass",
+            reason,
             **{k: cl[k] for k in ("total", "errors", "warnings", "rules")},
+            **extra,
         )
-    if (ruff_delta or 0) > 0 or (fmt_delta or 0) > 0 or (cl_delta or 0) > 0:
+    if (ruff_delta or 0) > 0 or (fmt_delta or 0) > 0 or (cl_counted or 0) > 0:
         tags.append("lint-regression")
 
     if pack:
@@ -306,6 +395,7 @@ def run_static(
         "ruff_format_delta": fmt_delta,
         "charmlint_total": cl.get("total"),
         "charmlint_delta": cl_delta,
+        "charmlint_excused": cl_excused,
         "packed": _ok(results["pack"]),
     }
     return TierOutcome(
@@ -315,6 +405,46 @@ def run_static(
         metrics=metrics,
         details={"checks": results, **({"changed_paths": changed} if changed is not None else {})},
     )
+
+
+def _gold_baseline(gold_lint: dict[str, Any] | None) -> dict[str, Any]:
+    if gold_lint is None:
+        return {"status": "not_available"}
+    return {
+        "status": "used",
+        "gold_sha": gold_lint.get("gold_sha"),
+        "charmlint": gold_lint.get("charmlint"),
+        "total": gold_lint.get("total"),
+    }
+
+
+def gold_lint_profile(
+    gold_tree: pathlib.Path,
+    charmlint: str,
+    *,
+    task_id: str,
+    gold_sha: str | None,
+    runner: _proc.Runner = _proc.run,
+) -> dict[str, Any]:
+    """charmlint on the gold's own tree: what ``run_static`` excuses against.
+
+    Raises ``GoldLintError`` if charmlint didn't run: a feature task is never
+    scored as if the gold had no findings.
+    """
+    counts = charmlint_counts(gold_tree, charmlint, runner)
+    if "error" in counts:
+        raise GoldLintError(counts["error"])
+    return {
+        "task": task_id,
+        "gold_sha": gold_sha,
+        "charmlint": charmlint,
+        "total": counts["total"],
+        "findings": [list(k) for k in counts["findings"]],
+    }
+
+
+class GoldLintError(RuntimeError):
+    pass
 
 
 def _ok(check: dict[str, Any] | None) -> bool | None:
