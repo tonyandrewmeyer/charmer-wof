@@ -7,20 +7,48 @@ files are removed again afterwards whatever happens.
 
 This needs the charm's Python environment (``uv`` resolves it from PyPI) but
 no Juju, so it can run anywhere the static tier can.
+
+Failure output (since 2026-11-26): ``details.failures`` keeps, for each failing
+oracle test, the exception type, the first line of its message, and a few
+lines of pytest's report (the ``>`` line that failed, the ``E`` lines and the
+``file:line`` locations), and ``details.collection_errors`` the same for a
+module that couldn't be imported. Capped per test (``FAILURE_LINES``,
+``FAILURE_LINE_CHARS``) and per record (``FAILURES_MAX`` tests,
+``FAILURE_CHARS_MAX`` characters of lines), with workspace and machine paths
+taken out, because records are public. For a task whose gold is private
+(``gold_private``), pytest's report quotes the gold's own source in every frame
+that isn't the agent's, and the frames can't be told apart reliably from the
+report alone (an agent's edit and the gold's code share files), so those tasks
+keep the exception type and message only. The agent's own tests aren't kept.
 """
 
 from __future__ import annotations
 
 import pathlib
+import re
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
+from typing import Any
 
 from ..config import OracleSpec, Task
 from ..schema import OracleOutcome
 from . import _proc
 
 JUNIT = ".wof/oracle-junit.xml"
+
+FAILURE_LINES = 12
+FAILURE_LINE_CHARS = 200
+FAILURE_MESSAGE_CHARS = 300
+FAILURES_MAX = 8
+FAILURE_CHARS_MAX = 8000
+
+_LOCATION = re.compile(r"^\S+:\d+: ")
+_TYPED = re.compile(r"^([A-Za-z_][\w.]*):(?: (.*)|$)")
+_MACHINE_PATH = re.compile(
+    r"(?<![\w.~-])/(?:home|tmp|root|runner|private|Users|__w|github)"
+    r"(?:/[^\s:'\"()\[\],<>]+)+"
+)
 
 
 def parse_junit(xml_text: str, marker: str) -> tuple[dict[str, str], dict[str, str], bool]:
@@ -40,7 +68,103 @@ def parse_junit(xml_text: str, marker: str) -> tuple[dict[str, str], dict[str, s
     return oracle, agent, collection_error
 
 
-def outcome_from_junit(xml_text: str, spec: OracleSpec) -> OracleOutcome:
+def scrub(text: str, workspace: pathlib.Path | None) -> str:
+    """Take the workspace's path out (relative paths stay), and any other machine path."""
+    if workspace is not None:
+        for root in {str(workspace), str(workspace.resolve())}:
+            text = text.replace(root.rstrip("/") + "/", "")
+    return _MACHINE_PATH.sub(lambda m: "<path>/" + m.group(0).rsplit("/", 1)[-1], text)
+
+
+def _type_and_message(message: str, text: str) -> tuple[str | None, str]:
+    """The exception type and the first line of its message.
+
+    From JUnit's ``message`` attribute, or for a collection error (whose
+    message is just "collection failure") from the last ``E   Type: ...`` line.
+    """
+    first = (message or "").splitlines()[0].strip() if message else ""
+    if first in ("", "collection failure"):
+        e_lines = [ln[1:].strip() for ln in text.splitlines() if ln.startswith("E ")]
+        typed = [ln for ln in e_lines if _TYPED.match(ln)]
+        first = typed[-1] if typed else (e_lines[-1] if e_lines else first)
+    m = _TYPED.match(first)
+    if m and not m.group(1)[0].isdigit():
+        return m.group(1), (m.group(2) or "").strip()
+    return None, first
+
+
+def _report_lines(text: str) -> list[str]:
+    """The lines of pytest's report worth keeping: what failed, where, and why."""
+    out: list[str] = []
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        stripped = ln.rstrip()
+        if stripped.startswith(">") or (stripped.startswith("E ") and stripped[1:].strip()):
+            out.append(stripped)
+        elif _LOCATION.match(stripped):
+            out.append(stripped)
+            nxt = lines[i + 1].rstrip() if i + 1 < len(lines) else ""
+            if nxt.startswith("    ") and nxt.strip() and set(nxt.strip()) != {"^"}:
+                out.append(nxt)
+    return [x[:FAILURE_LINE_CHARS] for x in out[-FAILURE_LINES:]]
+
+
+def failure_details(
+    xml_text: str,
+    marker: str,
+    *,
+    workspace: pathlib.Path | None = None,
+    private: bool = False,
+) -> dict[str, Any]:
+    """``failures`` and ``collection_errors`` for the record (see the module docstring)."""
+    failures: dict[str, dict[str, Any]] = {}
+    collection: dict[str, dict[str, Any]] = {}
+    omitted = 0
+    budget = FAILURE_CHARS_MAX
+    root = ET.fromstring(xml_text)
+    for case in root.iter("testcase"):
+        bad = case.find("failure")
+        if bad is None:
+            bad = case.find("error")
+        if bad is None:
+            continue
+        classname, name = case.get("classname", ""), case.get("name", "")
+        is_collection = not name or (bad.tag == "error" and not classname)
+        if not is_collection and marker not in classname and marker not in name:
+            continue  # the agent's own test
+        if len(failures) + len(collection) >= FAILURES_MAX:
+            omitted += 1
+            continue
+        text = scrub(bad.text or "", workspace)
+        kind, message = _type_and_message(scrub(bad.get("message", ""), workspace), text)
+        entry: dict[str, Any] = {"type": kind, "message": message[:FAILURE_MESSAGE_CHARS]}
+        if not private:
+            lines = _report_lines(text)
+            while lines and sum(len(x) for x in lines) > budget:
+                lines.pop(0)
+            budget -= sum(len(x) for x in lines)
+            entry["lines"] = lines
+        target = collection if is_collection else failures
+        target[f"{classname}::{name}"] = entry
+    out: dict[str, Any] = {}
+    if failures:
+        out["failures"] = failures
+    if collection:
+        out["collection_errors"] = collection
+    if omitted:
+        out["failures_omitted"] = omitted
+    if out and private:
+        out["failure_output"] = "type and message only (private gold)"
+    return out
+
+
+def outcome_from_junit(
+    xml_text: str,
+    spec: OracleSpec,
+    *,
+    workspace: pathlib.Path | None = None,
+    private: bool = False,
+) -> OracleOutcome:
     oracle, agent, collection_error = parse_junit(xml_text, spec.marker)
     key = {}
     for test in spec.key_tests:
@@ -60,6 +184,7 @@ def outcome_from_junit(xml_text: str, spec: OracleSpec) -> OracleOutcome:
         key_tests=key,
         tests=oracle,
         metrics={"full_pass": bool(oracle) and passed == len(oracle)},
+        details=failure_details(xml_text, spec.marker, workspace=workspace, private=private),
     )
 
 
@@ -96,4 +221,6 @@ def run_oracle(
             reason="no JUnit output (uv or pytest failed to start)",
             details={"stderr_tail": (proc.stderr or "")[-1500:]},
         )
-    return outcome_from_junit(junit.read_text(), spec)
+    return outcome_from_junit(
+        junit.read_text(), spec, workspace=workspace, private=task.gold_private
+    )
