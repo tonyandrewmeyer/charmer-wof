@@ -12,8 +12,10 @@ import itertools
 import random
 from collections.abc import Iterable
 
-from .config import Config
+from .config import Config, TaskKind
 from .schema import Cell
+
+TASK_KINDS = TaskKind.__args__
 
 
 @dataclasses.dataclass(frozen=True)
@@ -55,12 +57,27 @@ def expand(
     treatments: Iterable[str] | None = None,
     reps: int | None = None,
     anchors_only: bool = False,
+    kinds: Iterable[str] | None = None,
 ) -> list[PlannedCell]:
-    """Every cell, in a stable order; treatments are skipped where they don't apply."""
+    """Every cell, in a stable order; treatments are skipped where they don't apply.
+
+    ``kinds`` keeps only tasks of those kinds (``feature``, ``new-charm``): the
+    weekly run samples feature tasks, the monthly new-charm slot the briefs.
+    """
     reps = config.plan.reps if reps is None else reps
+    kinds = list(kinds) if kinds else None
+    if kinds:
+        unknown = [k for k in kinds if k not in TASK_KINDS]
+        if unknown:
+            raise ValueError(f"unknown task kind: {', '.join(unknown)}")
+    picked_tasks = [
+        t
+        for t in _pick(config.tasks, tasks, "task")
+        if kinds is None or config.tasks[t].kind in kinds
+    ]
     out = []
     for task_id, harness, model, treatment_id in itertools.product(
-        _pick(config.tasks, tasks, "task"),
+        picked_tasks,
         _pick(config.harnesses, harnesses, "harness"),
         _pick(config.models, models, "model"),
         _pick(config.treatments, treatments, "treatment"),

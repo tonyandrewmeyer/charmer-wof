@@ -33,4 +33,11 @@ treatment = "howto"
 # the OpenRouter key's own credit limit is the real ceiling.
 [gha]
 max_cells = 24
-scheduled_sample = 8   # the weekly run; anchors run monthly, on their own
+# The weekly run (eval.yml, Mondays): this many cells from the feature tasks
+# only. New-charm briefs are out of it (decided 2026-11-25): one brief at its
+# $3 cap was a third of the first scheduled run's spend.
+scheduled_sample = 8
+# The monthly new-charm slot (eval.yml, the 17th): this many cells from the
+# briefs only. PLAN §6 budgets 2-4 new-charm runs a month; at the $3 cap two
+# cells can spend at most $6.
+new_charm_sample = 2

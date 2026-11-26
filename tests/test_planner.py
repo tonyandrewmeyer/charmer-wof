@@ -35,6 +35,14 @@ def test_filters_and_reps(config):
         planner.expand(config, models=["gpt-9"])
 
 
+def test_kinds(config):
+    feature = planner.expand(config, kinds=["feature"], reps=1)
+    briefs = planner.expand(config, kinds=["new-charm"], reps=1)
+    assert {config.tasks[c.cell.task].kind for c in feature} == {"feature"}
+    assert {c.cell.task for c in briefs} == {"new-gotify-k8s", "new-pushgateway-k8s"}
+    assert len(feature) + len(briefs) == len(planner.expand(config, reps=1))
+
+
 def test_treatments_only_where_they_apply(private_tree):
     config = load_config([PACKAGE_ROOT, private_tree])
     cells = planner.expand(config, tasks=["secret-new-charm"], reps=1)

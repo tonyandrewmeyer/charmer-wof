@@ -55,6 +55,42 @@ def test_matrix_sample_is_seeded(capsys):
     assert a != c
 
 
+def test_weekly_sample_is_feature_tasks_only(capsys, config):
+    code, m, _ = matrix(
+        capsys, "--kind", "feature", "--sample", "--seed", "2026-11-30", "--reps", "1"
+    )
+    assert code == 0 and len(m["include"]) == config.plan.gha.scheduled_sample
+    assert {c["kind"] for c in m["include"]} == {"feature"}
+
+
+def test_monthly_new_charm_slot(capsys, config):
+    assert config.plan.gha.new_charm_sample == 2
+    code, m, _ = matrix(
+        capsys, "--kind", "new-charm", "--sample", "--seed", "2026-12-17", "--reps", "1"
+    )
+    assert code == 0 and len(m["include"]) == config.plan.gha.new_charm_sample
+    assert {c["kind"] for c in m["include"]} == {"new-charm"}
+    _, again, _ = matrix(
+        capsys, "--kind", "new-charm", "--sample", "--seed", "2026-12-17", "--reps", "1"
+    )
+    assert again == m
+    # The hard cap still applies to the slot.
+    code, _, err = matrix(
+        capsys, "--kind", "new-charm", "--sample", "--seed", "x", "--max-cells", "1"
+    )
+    assert code == 2 and "cap of 1" in err
+
+
+def test_a_new_charm_cell_still_runs_by_name(capsys):
+    code, m, _ = matrix(capsys, "--cells", "new-pushgateway-k8s/pi/glm-5-3/none/0")
+    assert code == 0 and m["include"][0]["kind"] == "new-charm"
+
+
+def test_unknown_kind_is_refused(capsys):
+    code, _, err = matrix(capsys, "--kind", "rewrite", "--sample")
+    assert code == 2 and "unknown task kind" in err
+
+
 def test_matrix_explicit_cells(capsys):
     code, m, _ = matrix(
         capsys,

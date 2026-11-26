@@ -35,6 +35,14 @@ def _split(values: list[str] | None) -> list[str] | None:
     return [v for value in values for v in value.replace(",", " ").split()] or None
 
 
+def _default_sample(config, kinds: list[str] | None) -> int:
+    """``--sample`` alone: the monthly new-charm slot's size for ``--kind new-charm``,
+    otherwise the weekly run's."""
+    if kinds == ["new-charm"]:
+        return config.plan.gha.new_charm_sample
+    return config.plan.gha.scheduled_sample
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     if not (args.dry_run or args.matrix_json):
         print("pass --dry-run to print the cell list, or --matrix-json for GHA", file=sys.stderr)
@@ -52,9 +60,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
                 treatments=_split(args.treatment),
                 reps=args.reps,
                 anchors_only=args.anchors_only,
+                kinds=_split(args.kind),
             )
         if args.sample is not None:
-            n = config.plan.gha.scheduled_sample if args.sample < 0 else args.sample
+            n = args.sample if args.sample >= 0 else _default_sample(config, _split(args.kind))
             cells = planner.sample(cells, n, args.seed)
     except ValueError as e:
         print(f"plan refused: {e}", file=sys.stderr)
@@ -369,6 +378,11 @@ def parser() -> argparse.ArgumentParser:
         s.add_argument(
             f"--{name}", action="append", help=f"only this {name} (repeatable, or comma-separated)"
         )
+    s.add_argument(
+        "--kind",
+        action="append",
+        help="only tasks of this kind: feature, new-charm (repeatable, or comma-separated)",
+    )
     s.add_argument("--reps", type=int)
     s.add_argument("--anchors-only", action="store_true")
     s.add_argument(
@@ -379,7 +393,8 @@ def parser() -> argparse.ArgumentParser:
         type=int,
         nargs="?",
         const=-1,
-        help="a seeded sample of this many (alone: [gha] scheduled_sample, the weekly run)",
+        help="a seeded sample of this many (alone: [gha] scheduled_sample, the weekly run, "
+        "or with --kind new-charm [gha] new_charm_sample, the monthly new-charm slot)",
     )
     s.add_argument("--seed", default="0", help="the sample's seed (eval.yml: the run's date)")
     s.add_argument("--max-cells", type=int, help="a lower cap than [gha] max_cells")
