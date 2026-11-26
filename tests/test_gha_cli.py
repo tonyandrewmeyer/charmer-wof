@@ -81,6 +81,23 @@ def test_monthly_new_charm_slot(capsys, config):
     assert code == 2 and "cap of 1" in err
 
 
+def test_sample_reads_the_records(capsys, tmp_path, config):
+    from charmer_wof.record import current_series
+
+    args = ("--kind", "feature", "--sample", "--seed", "2026-11-30", "--reps", "1")
+    _, none, _ = matrix(capsys, *args)
+    empty = tmp_path / "results.jsonl"
+    empty.write_text("")
+    code, m, err = matrix(capsys, *args, "--records", str(empty))
+    assert code == 0 and m == none  # no records: the seeded task-first pick
+    assert f"0 records in series {current_series(config)}" in err
+    code, _, err = matrix(capsys, *args, "--records", str(tmp_path / "missing.jsonl"))
+    assert code == 2 and "does not exist" in err
+    (tmp_path / "bad.jsonl").write_text("{not json\n")
+    code, _, err = matrix(capsys, *args, "--records", str(tmp_path / "bad.jsonl"))
+    assert code == 2 and "invalid record" in err
+
+
 def test_a_new_charm_cell_still_runs_by_name(capsys):
     code, m, _ = matrix(capsys, "--cells", "new-pushgateway-k8s/pi/glm-5-3/none/0")
     assert code == 0 and m["include"][0]["kind"] == "new-charm"

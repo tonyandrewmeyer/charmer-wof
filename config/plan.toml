@@ -1,6 +1,9 @@
 # Planner settings. `wof plan` expands the full matrix; on GHA (eval.yml) a
-# scheduled run takes a seeded sample of it (anchors first), and a manual run
-# names its cells. Budget-weighted sampling (PLAN §6) is still to come.
+# scheduled run samples it: a task first (every task once before any twice),
+# then that task's cell with the fewest records in the current series, read
+# from the results branch and seeded by the run's date (planner.sample). The
+# monthly anchor run takes the anchors, and a manual run names its cells.
+# Weighting by spend and event-triggered cells (PLAN §6) are still to come.
 
 reps = 3
 

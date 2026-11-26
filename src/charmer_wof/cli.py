@@ -64,8 +64,20 @@ def cmd_plan(args: argparse.Namespace) -> int:
             )
         if args.sample is not None:
             n = args.sample if args.sample >= 0 else _default_sample(config, _split(args.kind))
-            cells = planner.sample(cells, n, args.seed)
-    except ValueError as e:
+            counts = None
+            if args.records is not None:
+                if not args.records.is_file():
+                    raise ValueError(f"--records {args.records} does not exist")
+                counts = planner.record_counts(
+                    store.iter_records(args.records), current_series(config)
+                )
+                print(
+                    f"# {sum(counts.values())} records in series {current_series(config)} "
+                    f"from {args.records}",
+                    file=sys.stderr,
+                )
+            cells = planner.sample(cells, n, args.seed, counts)
+    except (ValueError, OSError) as e:
         print(f"plan refused: {e}", file=sys.stderr)
         return 2
     if args.matrix_json:
@@ -397,6 +409,12 @@ def parser() -> argparse.ArgumentParser:
         "or with --kind new-charm [gha] new_charm_sample, the monthly new-charm slot)",
     )
     s.add_argument("--seed", default="0", help="the sample's seed (eval.yml: the run's date)")
+    s.add_argument(
+        "--records",
+        type=pathlib.Path,
+        help="a results.jsonl whose records in the current series steer --sample to the "
+        "least-run cells (eval.yml: the results branch's; an empty file means none yet)",
+    )
     s.add_argument("--max-cells", type=int, help="a lower cap than [gha] max_cells")
     s.add_argument("--json", action="store_true", help="one JSON object per line")
     s.set_defaults(func=cmd_plan)
