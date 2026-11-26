@@ -223,7 +223,12 @@ def cmd_gold_check(args: argparse.Namespace) -> int:
             if task is None:
                 print(f"{record.cell.id}: task not in the config", file=sys.stderr)
                 continue
-            copy = contamination.gold_copy(task, record.artefacts.agent_diff)
+            copy = contamination.gold_copy(
+                task,
+                record.artefacts.agent_diff,
+                config.treatments.get(record.treatment.id),
+                record.treatment.artefacts,
+            )
             if copy.applies:
                 worst = max(
                     (

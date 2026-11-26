@@ -196,6 +196,7 @@ def score(
             ),
             task,
             diff,
+            treatment,
         )
     else:
         static_outcome = TierOutcome.not_run(NOT_SCORED)
@@ -254,14 +255,23 @@ def run_cell(
     return store.append(results, record, allowed_tags=allowed_tags(config))
 
 
-def with_gold_copy(outcome: TierOutcome, task: Task, diff: str | None) -> TierOutcome:
+def with_gold_copy(
+    outcome: TierOutcome,
+    task: Task,
+    diff: str | None,
+    treatment: Treatment | None = None,
+    recorded: dict[str, str] | None = None,
+) -> TierOutcome:
     """The static tier plus the gold-copy check (``scoring.contamination``).
+
+    With a ``treatment`` that generates visible tests from the oracle
+    (``tests-target``), their lines don't count as copying.
 
     The check adds the ``gold-copied`` tag and two metrics but doesn't change
     the tier's status: the static tier says whether the charm is sound, and
     the tag says whose charm it is.
     """
-    check = contamination.gold_copy(task, diff)
+    check = contamination.gold_copy(task, diff, treatment, recorded)
     tags = list(outcome.failure_tags)
     if check.copied and "gold-copied" not in tags:
         tags.append("gold-copied")

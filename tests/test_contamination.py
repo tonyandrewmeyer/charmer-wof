@@ -146,6 +146,66 @@ def test_static_tier_gets_the_tag_metrics_and_keeps_its_status(config):
     assert clean.status == "fail" and clean.failure_tags == []
 
 
+# --- tests-target: the agent's visible tests are the gold's (2026-11-26) ------------
+
+GET_CONFIG = "haproxy-get-configuration"
+
+
+def _visible(config) -> list[str]:
+    """The acceptance file tests-target writes for get-configuration, line by line."""
+    treatment = config.treatments["tests-target"]
+    task = config.tasks[GET_CONFIG]
+    ((source, _),) = treatment.generated_files(task)
+    return treatment.from_oracle.text(task, source).splitlines()
+
+
+def _gold_tests_reused(config) -> str:
+    """What the 2026-11-23 omp run did: the gold's tests, as handed over, in test_charm.py."""
+    return _diff("tests/unit/test_charm.py", _visible(config))
+
+
+def test_reusing_the_visible_tests_is_not_a_copy_on_tests_target(config):
+    task = config.tasks[GET_CONFIG]
+    diff = _gold_tests_reused(config)
+    # Without the treatment, the gold's test lines look like a copy.
+    assert c.gold_copy(task, diff).copied
+    check = c.gold_copy(task, diff, config.treatments["tests-target"])
+    assert not check.copied
+    dropped = check.details()["visible_lines_dropped"]
+    assert dropped["agent"] > 0 and dropped["gold"] > 0
+
+
+def test_copying_the_gold_src_on_tests_target_is_still_caught(config):
+    task = config.tasks[GET_CONFIG]
+    gold = c.gold_added_lines(task)
+    assert gold is not None and len(gold["src/charm.py"]) >= c.GOLD_COPY_FILE_MIN_LINES
+    diff = _diff("src/charm.py", gold["src/charm.py"]) + _gold_tests_reused(config)
+    check = c.gold_copy(task, diff, config.treatments["tests-target"])
+    assert check.copied
+    assert check.files["src/charm.py"]["ratio"] == 1.0
+
+
+def test_other_treatments_check_exactly_as_before(config):
+    task = config.tasks["hedgedoc-ingress"]
+    diff = _diff("src/charm.py", c.gold_added_lines(task)["src/charm.py"])
+    before = c.gold_copy(task, diff)
+    for treatment in ("none", "howto", "skill", "skill-scripts"):
+        assert c.visible_test_lines(task, config.treatments[treatment]) is None
+        assert c.gold_copy(task, diff, config.treatments[treatment]) == before
+    assert "visible_lines_dropped" not in before.details()
+
+
+def test_a_replay_only_drops_what_the_record_says_was_shown(config):
+    task = config.tasks[GET_CONFIG]
+    treatment = config.treatments["tests-target"]
+    current = treatment.artefact_versions(task)
+    assert c.visible_test_lines(task, treatment, current)
+    # tests-target version 1 generated another file: nothing of today's is dropped.
+    old = {"generated:tests/unit/test_get_configuration_acceptance.py": "sha256:0"}
+    assert c.visible_test_lines(task, treatment, old) == set()
+    assert c.gold_copy(task, _gold_tests_reused(config), treatment, old).copied
+
+
 # --- the process signal ----------------------------------------------------------
 
 SEARCH = (

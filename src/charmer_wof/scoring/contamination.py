@@ -23,6 +23,16 @@ alone (``wof gold-check`` re-runs them over a results file):
   no qualifying file above 0.48; both invalid records (the gold-visible smoke
   run and the haproxy salt run) are 1.00 on both.
 
+  When the treatment hands the agent tests generated from the oracle
+  (``tests-target``, 2026-11-26), every significant line of those generated
+  files is dropped from both sides before comparing: the oracle is the gold's
+  own tests, so an agent that reuses the tests it was given in its own test
+  file would otherwise look like a copy of the gold (the 2026-11-23
+  ``haproxy-get-configuration`` false positive). Only lines the agent was shown
+  are dropped; a copy of the gold's ``src/`` is still a copy.
+  ``details.gold_copy.visible_lines_dropped`` records how many. Every other
+  treatment's check is unchanged.
+
   New-charm briefs have no gold change to compare with, so the check doesn't
   apply (``details.gold_copy.applies`` is false). Pushgateway's Canonical charm
   is a reference the brief allows the agent to read, not a gold.
@@ -62,7 +72,7 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 from ..adapters.base import ToolEvent
-from ..config import Task
+from ..config import Task, Treatment, text_digest
 
 GOLD_COPY_OVERALL = 0.6
 GOLD_COPY_FILE = 0.8
@@ -171,6 +181,31 @@ def gold_added_lines(task: Task) -> dict[str, list[str]] | None:
     return lines
 
 
+def visible_test_lines(
+    task: Task, treatment: Treatment | None, recorded: dict[str, str] | None = None
+) -> set[str] | None:
+    """The significant lines of the files ``treatment`` generates from the oracle.
+
+    None when the treatment generates nothing for ``task`` (every treatment but
+    ``tests-target``). With ``recorded`` (a stored record's
+    ``treatment.artefacts``), only generated files whose digest matches the one
+    the record holds count, so a replay never drops lines the agent wasn't shown
+    (``tests-target`` version 1 generated a different file).
+    """
+    if treatment is None or treatment.from_oracle is None:
+        return None
+    generated = treatment.generated_files(task)
+    if not generated:
+        return None
+    out: set[str] = set()
+    for source, dest in generated:
+        text = treatment.from_oracle.text(task, source)
+        if recorded is not None and recorded.get(f"generated:{dest}") != text_digest(text):
+            continue
+        out |= {_normalise(x) for x in text.splitlines() if _significant(x)}
+    return out
+
+
 # --- the static signal ----------------------------------------------------------
 
 
@@ -182,6 +217,8 @@ class GoldCopy:
     files: dict[str, dict[str, float | int]] = dataclasses.field(default_factory=dict)
     copied: bool = False
     why: str | None = None
+    visible_dropped: dict[str, int] | None = None
+    """Lines dropped as the agent's visible tests (``tests-target`` only)."""
 
     def details(self) -> dict[str, Any]:
         out: dict[str, Any] = {"applies": self.applies}
@@ -198,6 +235,8 @@ class GoldCopy:
             )
             if self.why:
                 out["why"] = self.why
+            if self.visible_dropped is not None:
+                out["visible_lines_dropped"] = self.visible_dropped
         return out
 
     def metrics(self) -> dict[str, float]:
@@ -210,9 +249,34 @@ class GoldCopy:
         }
 
 
-def compare_with_gold(agent_diff: str, gold: dict[str, list[str]]) -> GoldCopy:
-    """Compare the agent's diff (``git diff``, strip 1) with the gold's added lines."""
+def _drop(lines: dict[str, list[str]], drop: set[str]) -> tuple[dict[str, list[str]], int]:
+    out: dict[str, list[str]] = {}
+    dropped = 0
+    for path, kept in lines.items():
+        left = [x for x in kept if x not in drop]
+        dropped += len(kept) - len(left)
+        if left:
+            out[path] = left
+    return out, dropped
+
+
+def compare_with_gold(
+    agent_diff: str, gold: dict[str, list[str]], visible: set[str] | None = None
+) -> GoldCopy:
+    """Compare the agent's diff (``git diff``, strip 1) with the gold's added lines.
+
+    ``visible`` (``visible_test_lines``) is dropped from both sides first.
+    """
     agent = _lines_by_file(parse_unified_diff(agent_diff or "", 1), "added")
+    visible_dropped = None
+    if visible is not None:
+        gold, gold_dropped = _drop(gold, visible)
+        agent, agent_dropped = _drop(agent, visible)
+        visible_dropped = {
+            "distinct": len(visible),
+            "gold": gold_dropped,
+            "agent": agent_dropped,
+        }
     g = collections.Counter(x for v in gold.values() for x in v)
     a = collections.Counter(x for v in agent.values() for x in v)
     shared = sum((g & a).values())
@@ -239,14 +303,22 @@ def compare_with_gold(agent_diff: str, gold: dict[str, list[str]]) -> GoldCopy:
         files=files,
         copied=why is not None,
         why=why,
+        visible_dropped=visible_dropped,
     )
 
 
-def gold_copy(task: Task, agent_diff: str | None) -> GoldCopy:
+def gold_copy(
+    task: Task,
+    agent_diff: str | None,
+    treatment: Treatment | None = None,
+    recorded: dict[str, str] | None = None,
+) -> GoldCopy:
+    """The static signal for one run; ``treatment`` and ``recorded`` as in
+    ``visible_test_lines``."""
     gold = gold_added_lines(task)
     if gold is None:
         return GoldCopy(applies=False)
-    return compare_with_gold(agent_diff or "", gold)
+    return compare_with_gold(agent_diff or "", gold, visible_test_lines(task, treatment, recorded))
 
 
 # --- the process signal ----------------------------------------------------------
