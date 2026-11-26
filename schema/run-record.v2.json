@@ -320,7 +320,78 @@
         },
         "details": {
           "additionalProperties": true,
-          "description": "Free-form diagnostics; dropped from public held-out records.",
+          "description": "Free-form diagnostics; dropped from public held-out records. Since 2026-11-26 (scoring code 6): `failures` (failing oracle test -> exception type, message and a few report lines; type and message only for a private gold), `collection_errors` (the same for a module that didn't import) and `failures_omitted` (how many more there were). Older records have none of them.",
+          "properties": {
+            "collection_errors": {
+              "additionalProperties": {
+                "properties": {
+                  "lines": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "type": "object"
+            },
+            "failure_output": {
+              "type": "string"
+            },
+            "failures": {
+              "additionalProperties": {
+                "properties": {
+                  "lines": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "type",
+                  "message"
+                ],
+                "type": "object"
+              },
+              "type": "object"
+            },
+            "failures_omitted": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
           "title": "Details",
           "type": "object"
         },

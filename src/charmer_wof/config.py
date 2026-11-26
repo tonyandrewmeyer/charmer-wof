@@ -364,7 +364,18 @@ class GhaConfig(_Strict):
     scheduled_sample: int = Field(
         default=8,
         ge=1,
-        description="Cells the weekly scheduled run picks (a seeded sample; anchors run monthly).",
+        description=(
+            "Cells the weekly scheduled run picks, from the feature tasks only (new-charm "
+            "briefs have their own monthly slot; anchors run monthly)."
+        ),
+    )
+    new_charm_sample: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Cells the monthly new-charm run picks, from the new-charm briefs only "
+            "(decided 2026-11-25: briefs leave the weekly sample; PLAN §6 budgets 2-4 a month)."
+        ),
     )
 
 

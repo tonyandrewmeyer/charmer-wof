@@ -171,7 +171,39 @@ class TierOutcome(_Model):
         return cls(status="not_run", reason=reason)
 
 
+_ORACLE_FAILURE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "type": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "message": {"type": "string"},
+        "lines": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["type", "message"],
+}
+
+
 class OracleOutcome(TierOutcome):
+    details: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Free-form diagnostics; dropped from public held-out records. Since 2026-11-26 "
+            "(scoring code 6): `failures` (failing oracle test -> exception type, message and "
+            "a few report lines; type and message only for a private gold), "
+            "`collection_errors` (the same for a module that didn't import) and "
+            "`failures_omitted` (how many more there were). Older records have none of them."
+        ),
+        json_schema_extra={
+            "properties": {
+                "failures": {"type": "object", "additionalProperties": _ORACLE_FAILURE_SCHEMA},
+                "collection_errors": {
+                    "type": "object",
+                    "additionalProperties": _ORACLE_FAILURE_SCHEMA,
+                },
+                "failures_omitted": {"type": "integer", "minimum": 1},
+                "failure_output": {"type": "string"},
+            }
+        },
+    )
     passed: int | None = None
     total: int | None = None
     agent_tests_passed: int | None = None

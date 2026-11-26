@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest"><testcase classname="" name="tests.unit.test__oracle_import" time="0.000"><error message="collection failure">tests/unit/test__oracle_import.py:6: in &lt;module&gt;
+    import charm  # noqa
+    ^^^^^^^^^^^^
+/home/runner/work/_temp/wof/ws/new-pushgateway-k8s__opencode__glm-5-3__none__0/src/charm.py:4: in &lt;module&gt;
+    class Charm(ops.CharmBase):
+src/charm.py:5: in Charm
+    def _on_start(self, event: ops.StartedEvent):
+                               ^^^^^^^^^^^^^^^^
+E   AttributeError: 'types.SimpleNamespace' object has no attribute 'StartedEvent'</error></testcase><testcase classname="tests.unit.test__oracle_x" name="test_oracle_port_is_rendered" time="0.001"><failure message="AssertionError: assert {'port': 9092...ar/lib/thing'} == {'port': 9091...ar/lib/thing'}&#10;  &#10;  Omitting 1 identical items, use -vv to show&#10;  Differing items:&#10;  {'port': 9092} != {'port': 9091}&#10;  Use -v to get more diff">def test_oracle_port_is_rendered():
+        out = render(9091)
+&gt;       assert out == {"port": 9091, "path": "/var/lib/thing"}
+E       AssertionError: assert {'port': 9092...ar/lib/thing'} == {'port': 9091...ar/lib/thing'}
+E         
+E         Omitting 1 identical items, use -vv to show
+E         Differing items:
+E         {'port': 9092} != {'port': 9091}
+E         Use -v to get more diff
+
+tests/unit/test__oracle_x.py:8: AssertionError</failure></testcase><testcase classname="tests.unit.test__oracle_x" name="test_oracle_raises" time="0.000"><failure message="KeyError: 'missing'">def test_oracle_raises():
+&gt;       {}["missing"]
+E       KeyError: 'missing'
+
+tests/unit/test__oracle_x.py:12: KeyError</failure></testcase><testcase classname="tests.unit.test_charm" name="test_agent_own" time="0.0"><failure message="AssertionError: agent">E AssertionError: agent</failure></testcase></testsuite></testsuites>

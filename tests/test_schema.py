@@ -8,6 +8,7 @@ from conftest import held_out
 from pydantic import ValidationError
 
 from charmer_wof import cli
+from charmer_wof.config import PACKAGE_ROOT
 from charmer_wof.record import scoring_ref
 from charmer_wof.schema import (
     SCHEMA_VERSION,
@@ -224,3 +225,19 @@ def test_public_form_drops_gold_subdir(record):
     data["task"]["gold_subdir"] = "charm"
     pub = public_form(RunRecord.model_validate(data))
     assert pub.task.gold_subdir is None and pub.task.gold_repo is None
+
+
+def test_every_stored_record_validates_against_the_committed_schema():
+    """Old records stay valid as the schema gains optional parts (2026-11-26: oracle failures)."""
+    schema = json.loads(cli.SCHEMA_PATH.read_text())
+    paths = [
+        PACKAGE_ROOT / "results" / "results.jsonl",
+        *(PACKAGE_ROOT / "results" / "invalid").glob("*.jsonl"),
+    ]
+    n = 0
+    for path in paths:
+        for line in path.read_text().splitlines():
+            if line.strip():
+                jsonschema.validate(json.loads(line), schema)
+                n += 1
+    assert n > 20

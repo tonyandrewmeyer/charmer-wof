@@ -11,6 +11,7 @@ from conftest import git
 
 from charmer_wof import cli, gold, ladder, planner, store, workspace
 from charmer_wof.adapters.base import AdapterResult, ToolEvent
+from charmer_wof.config import PACKAGE_ROOT
 
 # --- plan --matrix-json -------------------------------------------------------
 
@@ -53,6 +54,59 @@ def test_matrix_sample_is_seeded(capsys):
     _, c, _ = matrix(capsys, "--sample", "8", "--seed", "2026-11-26")
     assert a == b and len(a["include"]) == 8
     assert a != c
+
+
+def test_weekly_sample_is_feature_tasks_only(capsys, config):
+    code, m, _ = matrix(
+        capsys, "--kind", "feature", "--sample", "--seed", "2026-11-30", "--reps", "1"
+    )
+    assert code == 0 and len(m["include"]) == config.plan.gha.scheduled_sample
+    assert {c["kind"] for c in m["include"]} == {"feature"}
+
+
+def test_monthly_new_charm_slot(capsys, config):
+    assert config.plan.gha.new_charm_sample == 2
+    code, m, _ = matrix(
+        capsys, "--kind", "new-charm", "--sample", "--seed", "2026-12-17", "--reps", "1"
+    )
+    assert code == 0 and len(m["include"]) == config.plan.gha.new_charm_sample
+    assert {c["kind"] for c in m["include"]} == {"new-charm"}
+    _, again, _ = matrix(
+        capsys, "--kind", "new-charm", "--sample", "--seed", "2026-12-17", "--reps", "1"
+    )
+    assert again == m
+    # The hard cap still applies to the slot.
+    code, _, err = matrix(
+        capsys, "--kind", "new-charm", "--sample", "--seed", "x", "--max-cells", "1"
+    )
+    assert code == 2 and "cap of 1" in err
+
+
+def test_sample_reads_the_records(capsys, tmp_path, config):
+    from charmer_wof.record import current_series
+
+    args = ("--kind", "feature", "--sample", "--seed", "2026-11-30", "--reps", "1")
+    _, none, _ = matrix(capsys, *args)
+    empty = tmp_path / "results.jsonl"
+    empty.write_text("")
+    code, m, err = matrix(capsys, *args, "--records", str(empty))
+    assert code == 0 and m == none  # no records: the seeded task-first pick
+    assert f"0 records in series {current_series(config)}" in err
+    code, _, err = matrix(capsys, *args, "--records", str(tmp_path / "missing.jsonl"))
+    assert code == 2 and "does not exist" in err
+    (tmp_path / "bad.jsonl").write_text("{not json\n")
+    code, _, err = matrix(capsys, *args, "--records", str(tmp_path / "bad.jsonl"))
+    assert code == 2 and "invalid record" in err
+
+
+def test_a_new_charm_cell_still_runs_by_name(capsys):
+    code, m, _ = matrix(capsys, "--cells", "new-pushgateway-k8s/pi/glm-5-3/none/0")
+    assert code == 0 and m["include"][0]["kind"] == "new-charm"
+
+
+def test_unknown_kind_is_refused(capsys):
+    code, _, err = matrix(capsys, "--kind", "rewrite", "--sample")
+    assert code == 2 and "unknown task kind" in err
 
 
 def test_matrix_explicit_cells(capsys):
@@ -199,7 +253,7 @@ def test_score_in_another_process(agent_done, tmp_path, capsys):
     assert record.tiers.process.details["fetches"]
     assert record.tiers.static.status == "not_run"
     assert record.tiers.oracle.status == "not_run"
-    assert record.scoring.scoring_code_version.startswith("5+")
+    assert record.scoring.scoring_code_version.startswith("6+")
     assert "src/charm.py" in record.artefacts.agent_diff
 
 
@@ -263,3 +317,88 @@ def test_fetch_libs_runs_charmcraft(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
     workspace.fetch_libs(tmp_path)
     assert (tmp_path / "lib/charms/x/y.py").exists()
+
+
+# --- the gold's charmlint profile (2026-11-26) ----------------------------------
+
+
+def test_score_refuses_a_feature_task_without_the_gold_lint(config, tmp_path):
+    planned = planner.resolve(config, "haproxy-get-configuration/pi/glm-5-3/none/0")
+    ws = workspace.Workspace(tmp_path, "0" * 40, "prompt")
+    with pytest.raises(ladder.RunError, match="--no-gold-lint"):
+        ladder.score(
+            config,
+            planned,
+            ws,
+            AdapterResult("completed", None, None, 0.0, None, []),
+        )
+
+
+def test_load_gold_lint_checks_task_sha_and_pin(config, tmp_path):
+    task = config.tasks["haproxy-get-configuration"]
+    good = {"task": task.id, "gold_sha": task.gold_sha, "charmlint": "0.3.0", "findings": []}
+    path = tmp_path / "g.json"
+    path.write_text(json.dumps(good))
+    assert ladder.load_gold_lint(path, task, "0.3.0") == good
+    path.write_text(json.dumps({**good, "task": "haproxy-client-ip-hash-salt"}))
+    with pytest.raises(ladder.RunError, match="not the gold charmlint profile"):
+        ladder.load_gold_lint(path, task, "0.3.0")
+    with pytest.raises(ladder.RunError):
+        path.write_text(json.dumps(good))
+        ladder.load_gold_lint(path, task, "0.4.0")
+
+
+def test_gold_lint_lints_the_gold_tree(config, tmp_path, monkeypatch):
+    from charmer_wof.scoring import static
+
+    gold = tmp_path / "gold"
+    gold.mkdir()
+    git(gold, "init", "-q")
+    (gold / "haproxy-operator").mkdir()
+    (gold / "haproxy-operator" / "charmcraft.yaml").write_text("name: haproxy\n")
+    git(gold, "add", "-A")
+    git(gold, "commit", "-q", "-m", "gold")
+    sha = git(gold, "rev-parse", "HEAD")
+    task = config.tasks["haproxy-get-configuration"].model_copy(update={"gold_sha": sha})
+    seen = []
+
+    def fake_counts(tree, version, runner=None):
+        seen.append(sorted(p.name for p in tree.iterdir()))
+        return {"total": 1, "findings": [("R", "charmcraft.yaml", "m")]}
+
+    monkeypatch.setattr(static, "charmlint_counts", fake_counts)
+    profile = ladder.gold_lint_profile(config, task, gold)
+    assert seen == [["charmcraft.yaml"]]  # the subdirectory, not the repo root
+    assert profile == {"task": task.id, "gold_sha": sha, "charmlint": "0.3.0", "total": 1,
+                       "findings": [["R", "charmcraft.yaml", "m"]]}  # fmt: skip
+
+
+# --- wof rescore (2026-11-26) -----------------------------------------------------
+
+
+def test_rescore_from_the_record_alone(config, tmp_path, capsys):
+    from charmer_wof.record import current_series
+
+    invalid = (
+        PACKAGE_ROOT / "results" / "invalid" / "2026-11-17-haproxy-salt-copied-upstream.jsonl"
+    )
+    (old,) = store.iter_records(invalid)
+    out = tmp_path / "rescored.jsonl"
+    assert cli.main(["rescore", str(invalid), "--out", str(out)]) == 0
+    (new,) = store.iter_records(out)
+    assert new.series == current_series(config) != old.series
+    assert new.run_id != old.run_id and new.created_at == old.created_at
+    assert new.artefacts == old.artefacts and new.tiers.oracle == old.tiers.oracle
+    static = new.tiers.static
+    assert static.details["rescored_from"]["run_id"] == old.run_id
+    assert "gold-copied" in static.failure_tags  # a real copy stays a copy
+    # Without the gold, charmlint can't be baselined, and the record says so.
+    assert static.details["checks"]["charmlint"]["gold_baseline"] == {"status": "not_available"}
+    # The same record re-scored again gets the same id: re-running is idempotent.
+    again = tmp_path / "again.jsonl"
+    cli.main(["rescore", str(invalid), "--out", str(again)])
+    assert next(store.iter_records(again)).run_id == new.run_id
+    # And the store takes it like any other record.
+    results = tmp_path / "results.jsonl"
+    assert cli.main(["store", str(out), "--results", str(results)]) == 0
+    assert '"added": 1' in capsys.readouterr().out

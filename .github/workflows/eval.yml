@@ -1,11 +1,15 @@
 # The scheduled eval (PLAN §5, EGRESS.md): plan -> prep -> agent -> score -> store.
 #
 # - plan:  the planner picks this run's cells and emits them as a matrix,
-#          refused over config/plan.toml's [gha] max_cells.
+#          refused over config/plan.toml's [gha] max_cells. A scheduled
+#          sample reads the results branch's records, so it prefers the
+#          cells with the fewest records in the current series.
 # - prep:  once, with GitHub access: fetches the golds (the private hedgedoc
-#          gold with HEDGEDOC_GOLD_TOKEN, in that step only), installs the
-#          harnesses at their pinned versions, uv, Node and the Pythons the
-#          tasks need, builds every cell's workspace, and uploads them.
+#          gold with HEDGEDOC_GOLD_TOKEN, in that step only), lints each
+#          feature task's gold with charmlint (the static tier's baseline),
+#          installs the harnesses at their pinned versions, uv, Node and the
+#          Pythons the tasks need, builds every cell's workspace, and uploads
+#          them.
 # - agent: per cell, harden-runner in block mode with no GitHub content hosts,
 #          no GitHub token, the OpenRouter key in the agent step only, the gold
 #          and this repo hidden from the agent by the harness's mount namespace.
@@ -19,8 +23,9 @@ name: eval
 
 on:
   schedule:
-    - cron: "17 3 * * 1" # weekly: a seeded sample of [gha] scheduled_sample cells
+    - cron: "17 3 * * 1" # weekly: [gha] scheduled_sample cells of the feature tasks
     - cron: "41 2 3 * *" # monthly: the anchor set (PLAN §1.1)
+    - cron: "23 4 17 * *" # monthly: [gha] new_charm_sample cells of the new-charm briefs
   workflow_dispatch:
     inputs:
       cells:
@@ -87,6 +92,7 @@ env:
   UV_VERSION: "0.11.32"
   NODE_VERSION: "22"
   MONTHLY_CRON: "41 2 3 * *"
+  NEW_CHARM_CRON: "23 4 17 * *"
 
 jobs:
   plan:
@@ -106,6 +112,34 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: false
+      # The records so far, so a sample prefers the least-run cells. No
+      # results branch yet (a fresh repo; the store job creates it) means no
+      # records. Any other failure to read it fails the plan: a sample that
+      # quietly ignored the records would look the same as one that used them.
+      - name: Records so far (the results branch)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          url="https://github.com/$REPO"
+          rc=0
+          git -c "http.$url/.extraheader=$auth" ls-remote --exit-code --heads "$url" results > /dev/null || rc=$?
+          if [ "$rc" = 2 ]; then
+            echo "::notice::no results branch yet: planning with no records"
+            : > "$RUNNER_TEMP/records.jsonl"
+          elif [ "$rc" != 0 ]; then
+            echo "::error::could not read the results branch (git ls-remote exited $rc)"
+            exit 1
+          else
+            git -c "http.$url/.extraheader=$auth" clone -q --depth 1 --branch results "$url" "$RUNNER_TEMP/results-branch"
+            cp "$RUNNER_TEMP/results-branch/results/results.jsonl" "$RUNNER_TEMP/records.jsonl"
+            rm -rf "$RUNNER_TEMP/results-branch"
+          fi
+          echo "$(wc -l < "$RUNNER_TEMP/records.jsonl") records on the results branch"
+
       - name: Plan
         id: plan
         env:
@@ -122,11 +156,14 @@ jobs:
         run: |
           set -euo pipefail
           args=(plan --matrix-json)
+          records=(--records "$RUNNER_TEMP/records.jsonl")
           if [ "$EVENT" = schedule ]; then
             if [ "$SCHEDULE" = "$MONTHLY_CRON" ]; then
               args+=(--anchors-only --reps 1)
+            elif [ "$SCHEDULE" = "$NEW_CHARM_CRON" ]; then
+              args+=(--kind new-charm --sample --seed "$(date -u +%F)" --reps 1 "${records[@]}")
             else
-              args+=(--sample --seed "$(date -u +%F)" --reps 1)
+              args+=(--kind feature --sample --seed "$(date -u +%F)" --reps 1 "${records[@]}")
             fi
           elif [ -n "${IN_CELLS:-}" ]; then
             args+=(--cells "$IN_CELLS")
@@ -136,7 +173,7 @@ jobs:
             [ -n "${IN_MODEL:-}" ] && args+=(--model "$IN_MODEL")
             [ -n "${IN_TREATMENT:-}" ] && args+=(--treatment "$IN_TREATMENT")
             [ -n "${IN_REPS:-}" ] && args+=(--reps "$IN_REPS")
-            [ -n "${IN_SAMPLE:-}" ] && args+=(--sample "$IN_SAMPLE" --seed "$GITHUB_RUN_ID")
+            [ -n "${IN_SAMPLE:-}" ] && args+=(--sample "$IN_SAMPLE" --seed "$GITHUB_RUN_ID" "${records[@]}")
           fi
           [ -n "${IN_MAX_CELLS:-}" ] && args+=(--max-cells "$IN_MAX_CELLS")
           matrix="$(uv run --frozen --no-dev wof "${args[@]}")"
@@ -175,7 +212,7 @@ jobs:
       - name: The package, in the path every later job uses
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/wof"/{tools/bin,gold,ws,out/common,out/pi,out/omp,out/opencode}
+          mkdir -p "$RUNNER_TEMP/wof"/{tools/bin,gold,ws,out/common,out/pi,out/omp,out/opencode,out/gold-lint}
           git clone -q --no-hardlinks "$GITHUB_WORKSPACE" "$RUNNER_TEMP/wof/code"
           git -C "$RUNNER_TEMP/wof/code" remote remove origin
           echo "$MATRIX" > "$RUNNER_TEMP/wof/matrix.json"
@@ -267,6 +304,22 @@ jobs:
           if jq -e '.include[] | select(.fetch_libs)' matrix.json > /dev/null; then
             sudo snap install charmcraft --classic
           fi
+          # The static tier excuses charmlint findings the gold also has, so
+          # each feature task's gold is linted here, the only job with it. A
+          # private gold's profile names its files and actions, so it leaves
+          # this job encrypted, like its workspace. charmlint failing fails
+          # the run: scoring never goes ahead as if the gold had no findings.
+          for task in $(jq -r '[.include[] | select(.kind == "feature") | .task] | unique | .[]' matrix.json); do
+            [ -d "gold/$task" ] || continue
+            (cd code && .venv/bin/wof gold-lint "$task" --gold "$RUNNER_TEMP/wof/gold/$task" \
+              --out "$RUNNER_TEMP/wof/out/gold-lint/$task.json")
+            private="$(jq -r --arg t "$task" '[.include[] | select(.task == $t)][0].gold_private' matrix.json)"
+            if [ "$private" = true ]; then
+              openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:WOF_ARTIFACT_KEY \
+                -in "out/gold-lint/$task.json" -out "out/gold-lint/$task.json.enc"
+              rm "out/gold-lint/$task.json"
+            fi
+          done
           jq -c '.include[]' matrix.json | while read -r cell; do
             id="$(jq -r .cell <<<"$cell")"; slug="$(jq -r .slug <<<"$cell")"; task="$(jq -r .task <<<"$cell")"
             gold=()
@@ -287,6 +340,15 @@ jobs:
             if [ -d "tools/$h" ]; then tar --zstd -cf "out/$h/tools-$h.tar.zst" "tools/$h"; fi
           done
           ls -laR out
+
+      # The gold charmlint profiles go to the score jobs only.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.filter.outputs.count != '0'
+        with:
+          name: wof-gold-lint
+          path: ${{ runner.temp }}/wof/out/gold-lint/
+          retention-days: 3
+          if-no-files-found: ignore
 
       # One artifact for what every agent job needs, one per harness, so an
       # agent job downloads only its own harness (omp alone is ~290 MB).
@@ -476,14 +538,24 @@ jobs:
         with:
           name: wof-out-${{ matrix.slug }}
           path: ${{ runner.temp }}/in
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: matrix.kind == 'feature'
+        with:
+          name: wof-gold-lint
+          path: ${{ runner.temp }}/gold-lint
 
       - name: Unpack
         env:
           SLUG: ${{ matrix.slug }}
+          TASK: ${{ matrix.task }}
           WOF_ARTIFACT_KEY: ${{ secrets.WOF_ARTIFACT_KEY }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/wof/ws"
+          if [ -f "$RUNNER_TEMP/gold-lint/$TASK.json.enc" ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:WOF_ARTIFACT_KEY \
+              -in "$RUNNER_TEMP/gold-lint/$TASK.json.enc" -out "$RUNNER_TEMP/gold-lint/$TASK.json"
+          fi
           if [ -f "$RUNNER_TEMP/in/$SLUG.tar.zst.enc" ]; then
             openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:WOF_ARTIFACT_KEY \
               -in "$RUNNER_TEMP/in/$SLUG.tar.zst.enc" | tar -C "$RUNNER_TEMP/wof/ws" --zstd -xf -
@@ -510,15 +582,21 @@ jobs:
         env:
           CELL: ${{ matrix.cell }}
           SLUG: ${{ matrix.slug }}
+          KIND: ${{ matrix.kind }}
+          TASK: ${{ matrix.task }}
         run: |
           set -euo pipefail
           uv sync --frozen --no-dev
           mkdir -p "$RUNNER_TEMP/wof/records"
+          # A feature task is scored against its gold's charmlint profile
+          # (prep's gold-lint); without one `wof score` refuses, by design.
+          export GOLD_LINT=""
+          if [ "$KIND" = feature ]; then GOLD_LINT="$RUNNER_TEMP/gold-lint/$TASK.json"; fi
           # sg: the lxd group membership from the step above, for charmcraft.
           # The single quotes are deliberate: the inner shell expands the env.
           # shellcheck disable=SC2016
           sg lxd -c '.venv/bin/wof score "$CELL" --workspace "$RUNNER_TEMP/wof/ws/$SLUG" \
-            --tiers static,oracle,process,pack \
+            --tiers static,oracle,process,pack ${GOLD_LINT:+--gold-lint "$GOLD_LINT"} \
             --results "$RUNNER_TEMP/wof/records/$SLUG.jsonl"' | tee "$RUNNER_TEMP/score.json"
           jq -r '"- `\(.cell)`: \(.tiers | to_entries | map("\(.key) \(.value)") | join(", "))\(if (.review | length) > 0 then " **REVIEW: \(.review | join(", "))**" else "" end)"' \
             "$RUNNER_TEMP/score.json" >> "$GITHUB_STEP_SUMMARY"
