@@ -34,7 +34,7 @@ from .schema import (
     TierOutcome,
     Tiers,
 )
-from .scoring import _proc, contamination, oracle, process, static
+from .scoring import _proc, acceptance, contamination, oracle, process, static
 from .workspace import build_prompt
 
 
@@ -253,6 +253,7 @@ def score(
             diff,
             treatment,
         )
+        static_outcome = with_acceptance_check(static_outcome, task, treatment, workspace=ws.path)
     else:
         static_outcome = TierOutcome.not_run(NOT_SCORED)
     built = Tiers(
@@ -337,6 +338,54 @@ def with_gold_copy(
             "failure_tags": tags,
             "metrics": {**outcome.metrics, **check.metrics()},
             "details": {**outcome.details, "gold_copy": check.details()},
+        }
+    )
+
+
+def with_acceptance_check(
+    outcome: TierOutcome,
+    task: Task,
+    treatment: Treatment,
+    *,
+    workspace: pathlib.Path | None = None,
+    diff: str | None = None,
+    recorded: dict[str, str] | None = None,
+) -> TierOutcome:
+    """The static tier plus ``acceptance_tests`` (``scoring.acceptance``), for a
+    treatment that generates visible tests; unchanged for every other treatment.
+
+    Live, the files are read from ``workspace``; a replay passes the record's
+    ``diff`` and ``recorded`` artefacts instead. An edit to the tests' meaning
+    fails the tier; a reformat is tagged and recorded, and doesn't.
+    """
+    original = acceptance.generated(task, treatment, recorded)
+    if original is None:
+        return outcome
+    now = (
+        acceptance.from_workspace(workspace, list(original))
+        if workspace is not None
+        else acceptance.from_diff(original, diff)
+    )
+    result, new_tags = acceptance.check(original, now)
+    tags = list(outcome.failure_tags) + [t for t in new_tags if t not in outcome.failure_tags]
+    status = outcome.status
+    if result["status"] == "fail":
+        status = "fail"
+    elif result["status"] == "pass" and status == "error":
+        status = "pass"
+    checks = {**outcome.details.get("checks", {}), "acceptance_tests": result}
+    return outcome.model_copy(
+        update={
+            "status": status,
+            "reason": None if status != "error" else outcome.reason,
+            "failure_tags": tags,
+            "metrics": {
+                **outcome.metrics,
+                "acceptance_tests_ok": None
+                if result["status"] == "not_run"
+                else result["status"] == "pass",
+            },
+            "details": {**outcome.details, "checks": checks},
         }
     )
 
